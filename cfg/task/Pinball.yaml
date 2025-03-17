@@ -11,7 +11,7 @@ env:
   max_episode_length: 600
 
 drone_model:
-  name: Hummingbird # Iris
+  name: Hummingbird # Firefly # Iris
   controller: LeePositionController
 
 time_encoding: true

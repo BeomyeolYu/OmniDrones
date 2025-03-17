@@ -180,6 +180,25 @@ class MultirotorBase(RobotBase):
         self.drag_coef = torch.zeros(*self.shape, 1, device=self.device) * self.params["drag_coef"]
         self.intrinsics = self.intrinsics_spec.expand(self.shape).zero()
 
+        ###########################################################################################################
+        # Nominal value of quadrotor parameters:
+        self.m_nominal = 0.716#2.15 # mass of quad, [kg]
+        self.d_nominal = 0.23 # arm length, [m]
+        self.J = torch.diag(torch.tensor([0.022, 0.022, 0.035], device=self.device)) # inertia matrix of quad, [kg m2]
+        self.c_tf_nominal = 0.0135 # torque-to-thrust coefficients
+        self.c_tw_nominal = 2.2 # thrust-to-weight coefficients
+        self.g = 9.81 # standard gravity
+
+        # Force and Moment:
+        self.f = self.m_nominal * self.g # magnitude of total thrust to overcome  
+                                 # gravity and mass (No air resistance), [N]
+        self.hover_force = self.m_nominal * self.g / 4.0 # thrust magnitude of each motor, [N]
+        self.min_force = 0.5 # minimum thrust of each motor, [N]
+        self.max_force = self.c_tw_nominal * self.hover_force # maximum thrust of each motor, [N]
+        self.avrg_act = (self.min_force+self.max_force)/2.0 
+        self.scale_act = self.max_force-self.avrg_act # actor scaling
+
+
     def setup_randomization(self, cfg):
         if not self.initialized:
             raise RuntimeError

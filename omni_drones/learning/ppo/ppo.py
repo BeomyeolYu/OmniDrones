@@ -77,7 +77,14 @@ class Actor(nn.Module):
 
     def forward(self, features: torch.Tensor):
         loc = self.actor_mean(features)
-        scale = torch.exp(self.actor_std).expand_as(loc)
+        # loc = torch.tanh(self.actor_mean(features)) # TODO: Try tanh to ensure the output is [-1, 1]
+        '''
+        print(loc)
+            tensor([[[ 0.9240, -0.9794,  0.8404, -0.8992]]], device='cuda:0')
+            tensor([[[ 0.9201, -0.9782,  0.8411, -0.9013]]], device='cuda:0')
+            tensor([[[ 0.9162, -0.9746,  0.8244, -0.9049]]], device='cuda:0')
+        '''
+        scale = torch.exp(self.actor_std).expand_as(loc) # TODO: Try * 0. to make it deterministic
         return loc, scale
 
 
@@ -122,6 +129,7 @@ class PPOPolicy(TensorDictModuleBase):
                 nn.Sequential(make_mlp([256, 256, 256]), Actor(self.action_dim)),
                 [("agents", "observation")], ["loc", "scale"]
             )
+        # TODO: Here is an actor net
         self.actor: ProbabilisticActor = ProbabilisticActor(
             module=actor_module,
             in_keys=["loc", "scale"],

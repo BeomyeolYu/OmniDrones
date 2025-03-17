@@ -224,6 +224,9 @@ def euler_rotate(rpy: torch.Tensor, v: torch.Tensor):
 
 @manual_batch
 def quat_axis(q: torch.Tensor, axis: int=0):
+    """
+    This function is used to rotate a basis vector (e.g., [1, 0, 0] for the X-axis) by the quaternion
+    """
     basis_vec = torch.zeros(q.shape[0], 3, device=q.device)
     basis_vec[:, axis] = 1
     return quat_rotate(q, basis_vec)

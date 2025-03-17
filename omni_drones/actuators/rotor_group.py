@@ -52,6 +52,19 @@ class RotorGroup(nn.Module):
         self.requires_grad_(False)
 
     def forward(self, cmds: torch.Tensor):
+        '''
+        print(cmds)
+            BatchedTensor(lvl=2, bdim=0, value=
+                BatchedTensor(lvl=1, bdim=0, value=
+                    tensor([[[ 1.0513,  1.2362, -1.1389,  0.1132]]], device='cuda:0')
+                )
+            )
+            BatchedTensor(lvl=2, bdim=0, value=
+                BatchedTensor(lvl=1, bdim=0, value=
+                    tensor([[[1.5847, 1.0498, 0.1028, 1.1768]]], device='cuda:0')
+                )
+            )
+        '''
         target_throttle = self.f_inv(torch.clamp((cmds + 1) / 2, 0, 1))
 
         tau = torch.where(target_throttle > self.throttle, self.tau_up, self.tau_down)

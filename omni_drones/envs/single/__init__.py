@@ -26,3 +26,6 @@ from .track import Track
 from .fly_through import FlyThrough
 from .forest import Forest
 from .pinball import Pinball
+
+from .hover_f450 import Hover_F450
+from .pinball_f450 import Pinball_F450

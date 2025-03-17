@@ -265,6 +265,55 @@ class IsaacEnv(EnvBase):
         for substep in range(self.substeps):
             self._pre_sim_step(tensordict)
             self.sim.step(self._should_render(substep))
+            '''
+            print(tensordict)
+                TensorDict(
+                    fields={
+                        agents: TensorDict(
+                            fields={
+                                action: Tensor(shape=torch.Size([1, 1, 4]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                intrinsics: TensorDict(
+                                    fields={
+                                        KF: Tensor(shape=torch.Size([1, 1, 4]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                        KM: Tensor(shape=torch.Size([1, 1, 4]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                        com: Tensor(shape=torch.Size([1, 1, 3]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                        drag_coef: Tensor(shape=torch.Size([1, 1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                        inertia: Tensor(shape=torch.Size([1, 1, 3]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                        mass: Tensor(shape=torch.Size([1, 1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                        tau_down: Tensor(shape=torch.Size([1, 1, 4]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                        tau_up: Tensor(shape=torch.Size([1, 1, 4]), device=cuda:0, dtype=torch.float32, is_shared=True)},
+                                    batch_size=torch.Size([1, 1]),
+                                    device=cuda:0,
+                                    is_shared=True),
+                                observation: Tensor(shape=torch.Size([1, 1, 26]), device=cuda:0, dtype=torch.float32, is_shared=True)},
+                            batch_size=torch.Size([1]),
+                            device=cuda:0,
+                            is_shared=True),
+                        collector: TensorDict(
+                            fields={
+                                traj_ids: Tensor(shape=torch.Size([1]), device=cuda:0, dtype=torch.int64, is_shared=True)},
+                            batch_size=torch.Size([1]),
+                            device=cuda:0,
+                            is_shared=True),
+                        done: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.bool, is_shared=True),
+                        is_init: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.bool, is_shared=True),
+                        sample_log_prob: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                        state_value: Tensor(shape=torch.Size([1, 1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                        stats: TensorDict(
+                            fields={
+                                episode_len: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                heading_alignment: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                pos_error: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                                return: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True)},
+                            batch_size=torch.Size([1]),
+                            device=cuda:0,
+                            is_shared=True),
+                        terminated: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.bool, is_shared=True),
+                        truncated: Tensor(shape=torch.Size([1, 1]), device=cuda:0, dtype=torch.bool, is_shared=True)},
+                    batch_size=torch.Size([1]),
+                    device=cuda:0,
+                    is_shared=True)
+            '''
         self._post_sim_step(tensordict)
         self.progress_buf += 1
         tensordict = TensorDict({}, self.batch_size, device=self.device)
