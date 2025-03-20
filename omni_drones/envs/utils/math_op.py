@@ -229,3 +229,17 @@ def quat_rotate_inverse(q, v):
     c = q_vec * torch.bmm(q_vec.unsqueeze(1), v.unsqueeze(2)).squeeze(-1) * 2.0
 
     return a - b + c
+
+
+# Normalization state vectors: [max, min] -> [-1, 1]
+def state_normalization(state, x_lim, v_lim, W_lim):
+    x_norm, v_norm, W_norm = state[0:3]/x_lim, state[3:6]/v_lim, state[15:18]/W_lim
+    R_vec = state[6:15]
+    R = ensure_SO3(R_vec.reshape(3, 3, order='F')) # re-orthonormalization if needed
+
+    '''
+    R_vec = R.reshape(9, 1, order='F').flatten()
+    return x_norm, v_norm, R_vec, W_norm
+    '''
+
+    return x_norm, v_norm, R, W_norm
