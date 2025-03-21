@@ -233,13 +233,50 @@ def quat_rotate_inverse(q, v):
 
 # Normalization state vectors: [max, min] -> [-1, 1]
 def state_normalization(state, x_lim, v_lim, W_lim):
-    x_norm, v_norm, W_norm = state[0:3]/x_lim, state[3:6]/v_lim, state[15:18]/W_lim
-    R_vec = state[6:15]
-    R = ensure_SO3(R_vec.reshape(3, 3, order='F')) # re-orthonormalization if needed
-
+    x, v, R_vec, W = state[0], state[1], state[2], state[3]
+    x_norm, v_norm, W_norm = x/x_lim, v/v_lim, W/W_lim
     '''
+    R = ensure_SO3(R_vec.reshape(3, 3, order='F')) # re-orthonormalization if needed
+    
     R_vec = R.reshape(9, 1, order='F').flatten()
     return x_norm, v_norm, R_vec, W_norm
     '''
 
-    return x_norm, v_norm, R, W_norm
+    return x_norm, v_norm, R_vec, W_norm
+
+class IntegralErrorVec3:
+    def __init__(self, num_envs, device):
+        self.error = torch.zeros((num_envs, 1, 3), device=device)
+        self.integrand = torch.zeros((num_envs, 1, 3), device=device)
+
+    def integrate(self, current_integrand: torch.Tensor, dt: float):
+        # current_integrand: (num_envs, 1, 3)
+        self.error += 0.5 * (self.integrand + current_integrand) * dt
+        self.integrand = current_integrand
+
+    def set_zero(self, env_ids=None):
+        if env_ids is None:
+            self.error.zero_()
+            self.integrand.zero_()
+        else:
+            self.error[env_ids] = 0.
+            self.integrand[env_ids] = 0.
+
+
+class IntegralError:
+    def __init__(self, num_envs, device):
+        self.error = torch.zeros((num_envs, 1, 1), device=device)
+        self.integrand = torch.zeros((num_envs, 1, 1), device=device)
+
+    def integrate(self, current_integrand: torch.Tensor, dt: float):
+        # current_integrand: (num_envs, 1, 1)
+        self.error += 0.5 * (self.integrand + current_integrand) * dt
+        self.integrand = current_integrand
+
+    def set_zero(self, env_ids=None):
+        if env_ids is None:
+            self.error.zero_()
+            self.integrand.zero_()
+        else:
+            self.error[env_ids] = 0.
+            self.integrand[env_ids] = 0.

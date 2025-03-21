@@ -32,19 +32,28 @@ from omni_drones.utils.torch import quat_rotate, quat_axis
 
 
 class Hummingbird_F450(MultirotorBase):
-
+    '''TODO
     usd_path: str = ASSET_PATH + "/usd/hummingbird_f450.usd"
     param_path: str = ASSET_PATH + "/usd/hummingbird_f450.yaml"
+    '''
+    usd_path: str = ASSET_PATH + "/usd/hummingbird.usd"
+    param_path: str = ASSET_PATH + "/usd/hummingbird.yaml"
 
     def vmap_fMs(self, cmds):
-        f_norm, M = cmds[..., 0], cmds[..., 1:]  # extract normalized force and moment components [-1,1]
-        # f_norm, M = cmds[..., 0], cmds[..., 1:]*0  # extract normalized force and moment components [-1,1]
+        nominal_act_test = False
+        reg_M = 0.25 # TODO
 
+        f_norm, M = cmds[..., 0], cmds[..., 1:]*reg_M  # extract normalized force and moment components [-1,1]
+        if nominal_act_test == True:
+            f_norm, M = cmds[..., 0], cmds[..., 1:]*0  # extract normalized force and moment components [-1,1]
+
+        # Linear scale, [-1, 1] -> [min_act, max_act] 
         f_total = torch.clamp(4*(self.scale_act * f_norm + self.avrg_act), 4*self.min_force, 4*self.max_force)
 
         # Ensure force is only in the z-direction in the drone's body frame
         f = torch.stack([torch.zeros_like(f_total), torch.zeros_like(f_total), f_total], dim=-1) # [N]
-        # f = torch.stack([torch.zeros_like(f_total), torch.zeros_like(f_total), torch.ones_like(f_total)*self.hover_force*4], dim=-1) # [N]
+        if nominal_act_test == True:
+            f = torch.stack([torch.zeros_like(f_total), torch.zeros_like(f_total), torch.ones_like(f_total)*self.hover_force*4], dim=-1) # [N]
 
         return f.unsqueeze(-2), M.unsqueeze(-2)  # Expand to match expected shape
 
@@ -62,8 +71,8 @@ class Hummingbird_F450(MultirotorBase):
         self.torques[:] = torques
         '''
         print(self.forces, self.torques)
-        tensor([[[ 0.0000,  0.0000, 13.6167]], [[ 0.0000,  0.0000, 10.9408]]], device='cuda:0') 
-        tensor([[[-0.7194,  0.9023, -0.8981]], [[-0.2725, -1.0000, -1.0000]]], device='cuda:0')
+        tensor([[[ 0.0000,  0.0000, 15.0401]],[[ 0.0000,  0.0000,  2.0000]]], device='cuda:0') tensor([[[ 0.1071, -1.0000, -1.0000]],[[-0.4385,  0.1858,  0.9317]]], device='cuda:0')
+        tensor([[[ 0.0000,  0.0000, 10.1567]],[[ 0.0000,  0.0000, 15.4527]]], device='cuda:0') tensor([[[-0.4591,  0.7088,  0.4101]],[[-0.3140,  1.0000, -0.4043]]], device='cuda:0')
         '''
 
         # Apply forces and torques to the drone body

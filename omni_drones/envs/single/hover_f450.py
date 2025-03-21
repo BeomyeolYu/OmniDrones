@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import copy
 import math
 import torch
 import torch.distributions as D
@@ -34,7 +35,8 @@ from omni_drones.utils.torch import euler_to_quaternion, quat_axis, quaternion_t
 from tensordict.tensordict import TensorDict, TensorDictBase
 from torchrl.data import UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec
 
-from omni_drones.envs.utils.math_op import hat, vee, deriv_unit_vector, ensure_SO3, state_normalization#, quaternion_to_rotation_matrix
+from omni_drones.envs.utils.math_op import hat, vee, deriv_unit_vector, ensure_SO3, state_normalization, \
+    IntegralErrorVec3, IntegralError#, quaternion_to_rotation_matrix
 
 def attach_payload(parent_path):
     from omni.isaac.core import objects
@@ -150,32 +152,60 @@ class Hover_F450(IsaacEnv):
         self.init_poses = self.drone.get_world_poses(clone=True)
         self.init_vels = torch.zeros_like(self.drone.get_velocities())
 
-        self.target_pos = torch.tensor([[0.0, 0.0, 2.]], device=self.device)
-        self.target_heading = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self.target_pos = self.xd = torch.tensor([[0., 0., 2.]], device=self.device)  # desired tracking position command, [m]
+        self.target_heading = self.b1d = torch.zeros(self.num_envs, 1, 3, device=self.device)  # desired heading direction        
+        self.vd = torch.tensor([[0., 0., 0.]], device=self.device)  # [m/s]
+        self.Wd = torch.tensor([[0., 0., 0.]], device=self.device) # desired angular velocity [rad/s]
         self.alpha = 0.8
+
+        self.dt = cfg.sim.dt#0.016
+        self.sat_sigma = 1.
+        self.eIx = IntegralErrorVec3(self.num_envs, self.device)  # Position error integral
+        self.eIb1 = IntegralError(self.num_envs, self.device)     # Yaw alignment error integral
+        # Normalized integral errors
+        self.eIx_norm = torch.zeros((self.num_envs, 1, 3), device=self.device)
+        self.eIb1_norm = torch.zeros((self.num_envs, 1, 1), device=self.device)
 
         # Limits of states:
         self.x_lim = 1.0 # [m]
         self.v_lim = 4.0 # [m/s]
         self.W_lim = 2*torch.pi # [rad/s]
+        self.rp_lim = 0.2 # [rad]
+        self.eIx_lim  = 3.0 
+        self.eIb1_lim = 3.0 
 
         self.init_pos_dist = D.Uniform(
             torch.tensor([-self.x_lim, -self.x_lim, self.target_pos[0,-1]-1], device=self.device),
             torch.tensor([self.x_lim, self.x_lim, self.target_pos[0,-1]+1], device=self.device)
         )
         self.init_rpy_dist = D.Uniform(
-            torch.tensor([-.2, -.2, 0.], device=self.device) * torch.pi,
-            torch.tensor([0.2, 0.2, 2.], device=self.device) * torch.pi
+            torch.tensor([-self.rp_lim, -self.rp_lim, 0.], device=self.device) * torch.pi,
+            torch.tensor([ self.rp_lim,  self.rp_lim, 2.], device=self.device) * torch.pi
         )
         self.target_rpy_dist = D.Uniform(
             torch.tensor([0., 0., 0.], device=self.device) * torch.pi,
             torch.tensor([0., 0., 2.], device=self.device) * torch.pi
         )
 
+        self.reward_crash = -1. # Out of boundary or crashed!
+        self.Cx = 6.0
+        self.CIx = 0.1
+        self.Cv = 0.4
+        self.Cb1 = 6.0
+        self.CIb1 = 0.1
+        self.CW = 0.6
+        self.alpha = 0.01
+        self.beta = 0.05
+        # Compute reward_min using PyTorch
+        self.reward_min = -torch.ceil(torch.tensor(
+            self.Cx + self.CIx + self.Cv + self.Cb1 + self.CIb1 + self.CW,
+            device=self.device  # Keep it on the same device
+        ))
+
         if True:
             ##################################################################################
             self.g = 9.81 # standard gravity
-            self.dt = 1/60
+            # self.dt = 1/60
             # Isaac Sim uses ENU frame, but NED frame is used in FDCL.
             # Note that ENU and the NED here refer to their direction order.
             # ENU: E - axis 1, N - axis 2, U - axis 3
@@ -274,11 +304,11 @@ class Hover_F450(IsaacEnv):
 
     def _set_specs(self):  # This method to specify the input and output of the environment. It should at least include `observation_spec` and `action_spec`.
         drone_state_dim = self.drone.state_spec.shape[-1]  # drone_state_dim = 23, including pos(3), quat(4), linvel(3), angvel(3), headingvec(3), upvec(3), thr(4=quadrotor)
-        
+        '''
         observation_dim = drone_state_dim + 3  # rheading (3): The difference between the reference heading and the current heading.
         '''
         observation_dim = 23
-        '''
+        
         action_dim = 4
         """-------------------------------------------------------------------------------------------------------------
         | Agents  | Observations                    | obs_dim | Actions      | act_dim | Rewards                       |
@@ -333,6 +363,11 @@ class Hover_F450(IsaacEnv):
             pos + self.envs_positions[env_ids].unsqueeze(1), rot, env_ids
         )
         self.drone.set_velocities(self.init_vels[env_ids], env_ids)
+
+        self.eIx.set_zero(env_ids)
+        self.eIb1.set_zero(env_ids)
+        self.eIx_norm[env_ids] = 0.
+        self.eIb1_norm[env_ids] = 0.
 
         if self.has_payload:
             # TODO@btx0424: workout a better way
@@ -397,26 +432,33 @@ class Hover_F450(IsaacEnv):
         # state = [self.pos, self.rot, self.vel, self.heading, self.up, self.throttle * 2 - 1]
         '''
         x = self.drone_state[..., :3]
-        q = self.drone_state[..., 3:7]
+        self.q = self.drone_state[..., 3:7]
         v = self.drone_state[..., 7:10]
         W = self.drone_state[..., 10:13]
-        R = quaternion_to_rotation_matrix(q)
+        R = quaternion_to_rotation_matrix(self.q).squeeze(1) # Ensure R is in shape (num_UAVs, 3, 3); Remove the extra batch dimension if it exists
+        R_vec = R.permute(0, 2, 1).reshape(-1, 9)
         b1 = self.drone_state[..., 13:16]
         b3 = self.drone_state[..., 16:19]
         # throttle = self.drone_state[..., 19:]
-        state = [x, v, R, W]
+        state = [x, v, R_vec, W]
 
         """-------------------------------------------------------------------------------------------------------------
         | Agents  | Observations                    | obs_dim | Actions      | act_dim | Rewards                       |
         | single  | {ex, eIx, ev, R, eb1, eIb1, eW} | 23      | {f_total, M} | 4       | f(ex, eIx, ev, eb1, eIb1, eW) |
         -------------------------------------------------------------------------------------------------------------"""
         # relative position and heading
-        self.ex = self.target_pos - self.drone_state[..., :3]
+        self.rpos = self.target_pos - self.drone_state[..., :3]
         self.rheading = self.target_heading - self.drone_state[..., 13:16]
 
-        obs1 = self.get_norm_error_state(state)#TODO:(self.framework)
-        obs = [self.ex, self.drone_state[..., 3:], self.rheading,]
-        print(obs1, obs)
+        obs = self.get_norm_error_state(state) #TODO:(self.framework) 
+        self.error_obs = copy.deepcopy(obs) # [ex_norm, self.eIx_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, self.eIb1_norm, eW_norm]
+
+        # R = state[2].squeeze(1)
+        # R_vec = R.permute(0, 2, 1).reshape(-1, 9)
+        # R = R_vec.reshape(-1, 3, 3).permute(0, 2, 1)
+
+        #obs = [self.rpos, self.drone_state[..., 3:], self.rheading,]
+
         if self.time_encoding:
             t = (self.progress_buf / self.max_episode_length).unsqueeze(-1)
             obs.append(t.expand(-1, self.time_encoding_dim).unsqueeze(1))
@@ -443,12 +485,38 @@ class Hover_F450(IsaacEnv):
         )
 
     def _compute_reward_and_done(self):  # This method to compute the reward and termination flags for the transition step.
+        #self.error_obs = [ex_norm, self.eIx_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, self.eIb1_norm, eW_norm]
+        ex_norm = self.error_obs[0]
+        eIx_norm = self.error_obs[1]
+        ev_norm = self.error_obs[2]
+        R_vec = self.error_obs[3]
+        eb1_norm = self.error_obs[4]
+        eIb1_norm = self.error_obs[5]
+        eW_norm = self.error_obs[6]
+
+        # Ensure all rewards have shape (batch_size, 1)
+        reward_eX = -self.Cx * (torch.norm(ex_norm, dim=-1, keepdim=True) ** 2).squeeze(-1)  # (batch_size, 1)
+        reward_eIX = -self.CIx * (torch.norm(eIx_norm, dim=-1, keepdim=True) ** 2).squeeze(-1)  # (batch_size, 1)
+        reward_eV = -self.Cv * (torch.norm(ev_norm, dim=-1, keepdim=True) ** 2).squeeze(-1)  # (batch_size, 1)
+        reward_eb1 = -self.Cb1 * torch.abs(eb1_norm).squeeze(-1)  # (batch_size, 1)
+        reward_eIb1 = -self.CIb1 * (torch.abs(eIb1_norm)**2).squeeze(-1)  # (batch_size, 1)
+        reward_eW = -self.CW * (torch.norm(eW_norm, dim=-1, keepdim=True) ** 2).squeeze(-1)  # (batch_size, 1)
+
+        assert reward_eX.shape == reward_eIX.shape == reward_eV.shape == reward_eb1.shape  == reward_eIb1.shape == reward_eW.shape
+        reward = reward_eX + reward_eIX + reward_eV + reward_eb1 + reward_eIb1 + reward_eW
+        
+        # Clamp reward to the interpolation range for stability
+        reward = torch.clamp(reward, min=self.reward_min.item(), max=0.0)
+
+        # Linearly scale reward from [reward_min, 0] → [0, 1]
+        reward = (reward - self.reward_min) / (0.0 - self.reward_min)  # Equivalent to np.interp()
+
         # pose reward
-        pos_error = torch.norm(self.ex, dim=-1)
+        pos_error = torch.norm(self.rpos, dim=-1)
         heading_alignment = torch.sum(self.drone.heading * self.target_heading, dim=-1)
 
-        distance = torch.norm(torch.cat([self.ex, self.rheading], dim=-1), dim=-1)
-
+        distance = torch.norm(torch.cat([self.rpos, self.rheading], dim=-1), dim=-1)
+        '''
         reward_pose = 1.0 / (1.0 + torch.square(self.reward_distance_scale * distance))
         # pose_reward = torch.exp(-distance * self.reward_distance_scale)
         # uprightness
@@ -463,18 +531,26 @@ class Hover_F450(IsaacEnv):
         reward_action_smoothness = self.reward_action_smoothness_weight * torch.exp(-self.drone.throttle_difference)
 
         assert reward_pose.shape == reward_up.shape == reward_spin.shape
+        print(reward_pose.shape, reward_up.shape, reward_spin.shape)
+        
         reward = (
             reward_pose
             + reward_pose * (reward_up + reward_spin)
             # + reward_effort
             + reward_action_smoothness
         )
+        '''
 
         misbehave = (self.drone.pos[..., 2] < 0.2) | (distance > 4)
         hasnan = torch.isnan(self.drone_state).any(-1)
 
         terminated = misbehave | hasnan
         truncated = (self.progress_buf >= self.max_episode_length).unsqueeze(-1)
+        ''' TODO
+        # Terminal condition (Out of boundary or crashed!)
+        if terminated or truncated:
+            reward = self.reward_crash
+        '''
 
         self.stats["pos_error"].lerp_(pos_error, (1-self.alpha))
         self.stats["heading_alignment"].lerp_(heading_alignment, (1-self.alpha))
@@ -497,7 +573,7 @@ class Hover_F450(IsaacEnv):
     
     def get_norm_error_state(self, state):#, framework): #TODO: framework
         # Normalize state vectors: [max, min] -> [-1, 1]
-        x_norm, v_norm, R, W_norm = state_normalization(state, self.x_lim, self.v_lim, self.W_lim)
+        x_norm, v_norm, R_vec, W_norm = state_normalization(state, self.x_lim, self.v_lim, self.W_lim)
         '''
         x_norm, v_norm, R_vec, W_norm = state_normalization(self.state, self.x_lim, self.v_lim, self.W_lim)
         R = R_vec.reshape(3, 3, order='F')
@@ -512,34 +588,51 @@ class Hover_F450(IsaacEnv):
         ex_norm = x_norm - xd_norm # norm pos error
         ev_norm = v_norm - vd_norm # norm vel error
         eW_norm = W_norm - Wd_norm # norm ang vel error
+        '''
         eW3_norm = W_norm[2] - Wd_norm[2]
+        '''
 
         # Compute yaw angle error: 
-        b1 = quat_axis(self.rot, axis=0)
-        b2 = quat_axis(self.rot, axis=1)
-        b3 = quat_axis(self.rot, axis=2)
-        '''
-        b1, b2, b3 = R@self.e1, R@self.e2, R@self.e3
-        '''
-        b1c = self.b1d - torch.dot(self.b1d, b3) * b3
-        eb1 = torch.atan2(-torch.dot(b1c, b2), torch.dot(b1c, b1))
-        eb1_norm = eb1 / torch.pi
+        b1 = quat_axis(self.q, axis=0)  # Shape: (batch_size, 1, 3)
+        b2 = quat_axis(self.q, axis=1)  # Shape: (batch_size, 1, 3)
+        b3 = quat_axis(self.q, axis=2)  # Shape: (batch_size, 1, 3)
+        dot_b1d_b3 = torch.einsum('bnd,bnd->bn', self.b1d, b3).unsqueeze(-1)  # Shape: (batch_size, 1, 1)
+        b1c = self.b1d - dot_b1d_b3 * b3  # Shape: (batch_size, 1, 3)
 
-        
-        # Update integral terms: 
-        """
-        self.eIx.integrate(-self.alpha*self.eIx.error + ex_norm*self.x_lim, self.dt) 
-        self.eIx_norm = clip(self.eIx.error/self.eIx_lim, -self.sat_sigma, self.sat_sigma)
-        self.eIb1.integrate(-self.beta*self.eIb1.error + eb1_norm*np.pi, self.dt) # b1 integral error
-        self.eIb1_norm = clip(self.eIb1.error/self.eIb1_lim, -self.sat_sigma, self.sat_sigma)
-        """
+        numerator = torch.einsum('bnd,bnd->bn', b1c, b2).unsqueeze(-1)  # Shape: (batch_size, 1, 1)
+        denominator = torch.einsum('bnd,bnd->bn', b1c, b1).unsqueeze(-1)  # Shape: (batch_size, 1, 1)
+        eb1 = torch.atan2(-numerator, denominator)  # Shape: (batch_size, 1, 1)
+        eb1_norm = eb1 / torch.pi  # Shape: (batch_size, 1, 1)
+
+        # --- Update positional integral (error shape: (batch_size, 1, 3)) ---
+        ex = ex_norm * self.x_lim  # (batch_size, 1, 3)
+        eIx_integrand = -self.alpha * self.eIx.error + ex
+        self.eIx.integrate(eIx_integrand, self.dt)
+
+        # Normalize & clip
+        self.eIx_norm = torch.clamp(
+            self.eIx.error / self.eIx_lim,
+            min=-self.sat_sigma,
+            max=self.sat_sigma
+        )
+
+        # --- Update yaw integral (error shape: (batch_size, 1, 1)) ---
+        eIb1_integrand = -self.beta * self.eIb1.error + eb1  # all (batch_size, 1, 1)
+        self.eIb1.integrate(eIb1_integrand, self.dt)
+
+        # Normalize & clip
+        self.eIb1_norm = torch.clamp(
+            self.eIb1.error / self.eIb1_lim,
+            min=-self.sat_sigma,
+            max=self.sat_sigma
+        )
+
         # Single-agent's obs:
-        R_vec = R.reshape(9, 1).flatten()
-        obs = torch.cat((ex_norm, ev_norm, R_vec, eb1_norm.unsqueeze(0), eW_norm), dim=0).float()
-        """
-        obs = torch.cat((ex_norm, self.eIx_norm, ev_norm, R_vec, eb1_norm.unsqueeze(0), self.eIb1_norm, eW_norm), dim=0).float()
-        """
-        error_obs_n = [obs]
+        # R = state[2].squeeze(1)
+        # R_vec = R.permute(0, 2, 1).reshape(-1, 9)
+        # R = R_vec.reshape(-1, 3, 3).permute(0, 2, 1)
+        # error_obs = [ex_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, eW_norm]
+        error_obs = [ex_norm, self.eIx_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, self.eIb1_norm, eW_norm]
         """
         if framework in ("CMP","DMP"):
             # Agent1's obs:
@@ -552,9 +645,11 @@ class Hover_F450(IsaacEnv):
             obs_2 = np.concatenate((b1, eb1_norm, self.eIb1_norm, eW3_norm), axis=None, dtype=np.float32)
             error_obs_n = [obs_1, obs_2]
         elif framework == "NMP":
-        """
         
         return error_obs_n
+        """
+        return error_obs
+        
 
     def get_drone_body_pos_rot(self):
         drone_body_position, drone_body_orientation = self.drone.base_link.get_world_poses(clone=False)
