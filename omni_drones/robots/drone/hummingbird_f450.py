@@ -32,12 +32,8 @@ from omni_drones.utils.torch import quat_rotate, quat_axis
 
 
 class Hummingbird_F450(MultirotorBase):
-    '''TODO
     usd_path: str = ASSET_PATH + "/usd/hummingbird_f450.usd"
     param_path: str = ASSET_PATH + "/usd/hummingbird_f450.yaml"
-    '''
-    usd_path: str = ASSET_PATH + "/usd/hummingbird.usd"
-    param_path: str = ASSET_PATH + "/usd/hummingbird.yaml"
 
     def vmap_fMs(self, cmds):
         nominal_act_test = False

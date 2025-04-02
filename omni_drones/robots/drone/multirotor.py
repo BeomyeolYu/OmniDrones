@@ -182,7 +182,7 @@ class MultirotorBase(RobotBase):
 
         ###########################################################################################################
         # Nominal value of quadrotor parameters:
-        self.m_nominal = 0.716#2.15 # mass of quad, [kg]
+        self.m_nominal = 2.15 # mass of quad, [kg]
         self.d_nominal = 0.23 # arm length, [m]
         self.J = torch.diag(torch.tensor([0.022, 0.022, 0.035], device=self.device)) # inertia matrix of quad, [kg m2]
         self.c_tf_nominal = 0.0135 # torque-to-thrust coefficients
