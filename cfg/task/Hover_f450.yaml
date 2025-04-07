@@ -8,6 +8,7 @@ defaults:
 env:
   num_envs: 128
   env_spacing: 4
+  max_episode_length: 500 #(default: 500)
 
 drone_model:
   name: hummingbird_f450 #Firefly
