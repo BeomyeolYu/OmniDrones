@@ -45,26 +45,26 @@ from .common import GAE
 class PPOConfig:
     name: str = "ppo"
 
-    lr_a: float = 3e-4 #(default: 5e-4)
-    lr_c: float = 2e-4 #(default: 5e-4)
+    lr_a: float = 5e-4 #3e-4  #(default: 5e-4)
+    lr_c: float = 5e-4 #2e-4  #(default: 5e-4)
 
-    train_every: int = 32 #(default: 32)
-    ppo_epochs: int = 4 #(default: 4)
-    num_minibatches: int = 32 #(default: 16)
-    entropy_coef: float = 0.01 #(default: 0.001)
-    clip_param: float = 0.2 #(default: 0.1)
+    train_every: int = 2048  #(default: 32)
+    ppo_epochs: int = 4  #(default: 4)
+    num_minibatches: int = 16  #(default: 16)
+    entropy_coef: float = 0.001  #(default: 0.001)
+    clip_param: float = 0.1  #(default: 0.1)
 
     gamma: float = 0.99  #(default: 0.99)
     GAE_lambda: float = 0.9  #(default: 0.95)
-    grad_max_norm: float = 100  #(default: 5)
+    grad_max_norm: float = 5  #(default: 5)
     
     # network size
     actor_hidden_dim: int = 16  #(default: [256, 256, 256])
     critic_hidden_dim: int = 256  #(default: [256, 256, 256])
 
-    lam_T: float = 0.4
-    lam_S: float = 0.3
-    lam_M: float = 0.6
+    lam_T: float = 0.1 #(default: 0.4)
+    lam_S: float = 0.05 #(default: 0.3)
+    lam_M: float = 0.2 #(default: 0.6)
 
     # whether to use privileged information
     priv_actor: bool = False
@@ -373,8 +373,6 @@ class PPOPolicy(TensorDictModuleBase):
 
     # Regularizing action policies for smooth control
     def policy_regularization(self, actor, actor_loss, batch_obs, batch_obs_next):#, env, args):
-
-
         # Retrieving a recent set of actions:
         batch_act = actor(batch_obs)[0].clamp(-self.max_action, self.max_action)
         batch_act_next = actor(batch_obs_next)[0].clamp(-self.max_action, self.max_action)
@@ -406,6 +404,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         M_hover = torch.zeros(batch_size, 3).to(self.device)
         nominal_action = torch.cat([f_total_hover, M_hover], 1).to(self.device)
+        nominal_action = nominal_action.unsqueeze(1)  # [B, A] -> [B, 1, A]
         Loss_M = F.mse_loss(batch_act, nominal_action)
 
         # Regularized actor loss for smooth control:

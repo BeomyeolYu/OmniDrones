@@ -237,7 +237,7 @@ def main(cfg):
 
         if save_interval > 0 and i % save_interval == 0:
             if hasattr(policy, "state_dict"):
-                ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pt")
+                ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pth")
                 logging.info(f"Save checkpoint to {str(ckpt_path)}")
                 torch.save(policy.state_dict(), ckpt_path)
 
@@ -258,7 +258,7 @@ def main(cfg):
     run.log(info)
 
     try:
-        ckpt_path = os.path.join(run.dir, "checkpoint_final.pt")
+        ckpt_path = os.path.join(run.dir, "checkpoint_final.pth")
         torch.save(policy.state_dict(), ckpt_path)
         logging.info(f"Saved checkpoint to {str(ckpt_path)}")
     except AttributeError:

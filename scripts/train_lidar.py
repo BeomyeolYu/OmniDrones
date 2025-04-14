@@ -343,7 +343,7 @@ def main(cfg):
 
         if save_interval > 0 and i % save_interval == 0:
             try:
-                ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pt")
+                ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pth")
                 torch.save(policy.state_dict(), ckpt_path)
                 logging.info(f"Saved checkpoint to {str(ckpt_path)}")
             except AttributeError:
@@ -363,7 +363,7 @@ def main(cfg):
     run.log(info)
 
     try:
-        ckpt_path = os.path.join(run.dir, "checkpoint_final.pt")
+        ckpt_path = os.path.join(run.dir, "checkpoint_final.pth")
         torch.save(policy.state_dict(), ckpt_path)
 
         model_artifact = wandb.Artifact(

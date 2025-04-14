@@ -105,6 +105,7 @@ def main(cfg):
         device=cfg.sim.device,
         return_same_td=True,
     )
+    best_return_value, return_value = base_env.max_episode_length*0.9, 0.  # to save the best model
 
     # print(env.input_spec)
     # print(env.output_spec)
@@ -177,6 +178,7 @@ def main(cfg):
                 "train/" + (".".join(k) if isinstance(k, tuple) else k): torch.mean(v.float()).item()
                 for k, v in episode_stats.pop().items(True, True)
             }
+            return_value = stats['train/stats.return']
             info.update(stats)
 
         info.update(policy.train_op(data.to_tensordict()))
@@ -187,11 +189,14 @@ def main(cfg):
             env.train()
             base_env.train()
 
-        if save_interval > 0 and i % save_interval == 0:
+        # if save_interval > 0 and i % save_interval == 0:
+        if save_interval > 0 and return_value > best_return_value:
             try:
-                ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pt")
+                ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pth")
                 torch.save(policy.state_dict(), ckpt_path)
                 logging.info(f"Saved checkpoint to {str(ckpt_path)}")
+                print("return_value:", return_value, "best_return_value:", best_return_value)
+                best_return_value = return_value
             except AttributeError:
                 logging.warning(f"Policy {policy} does not implement `.state_dict()`")
 
@@ -209,7 +214,7 @@ def main(cfg):
     run.log(info)
 
     try:
-        ckpt_path = os.path.join(run.dir, "checkpoint_final.pt")
+        ckpt_path = os.path.join(run.dir, "checkpoint_final.pth")
         torch.save(policy.state_dict(), ckpt_path)
 
         model_artifact = wandb.Artifact(

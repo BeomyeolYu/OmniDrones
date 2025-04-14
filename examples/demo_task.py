@@ -37,7 +37,7 @@ def main(cfg):
 
     model_artifact = run.use_artifact(f"{cfg.wandb.entity}/{cfg.wandb.project}/{cfg.wandb.artifact_name}:{cfg.wandb.artifact_version}")
     model_dir = model_artifact.download()
-    model_filename = "checkpoint_final.pt"
+    model_filename = "checkpoint_final.pth"
     for key in getattr(model_artifact, "_manifest").entries.keys():
         print(key)
         if key.split('.')[-1] == "pt":
