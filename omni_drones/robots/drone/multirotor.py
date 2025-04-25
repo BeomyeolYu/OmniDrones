@@ -180,24 +180,6 @@ class MultirotorBase(RobotBase):
         self.drag_coef = torch.zeros(*self.shape, 1, device=self.device) * self.params["drag_coef"]
         self.intrinsics = self.intrinsics_spec.expand(self.shape).zero()
 
-        ###########################################################################################################
-        # Nominal value of quadrotor parameters:
-        self.m_nominal = 2.15 # mass of quad, [kg]
-        self.d_nominal = 0.23 # arm length, [m]
-        self.J = torch.diag(torch.tensor([0.022, 0.022, 0.035], device=self.device)) # inertia matrix of quad, [kg m2]
-        self.c_tf_nominal = 0.0135 # torque-to-thrust coefficients
-        self.c_tw_nominal = 2.2 # thrust-to-weight coefficients
-        self.g = 9.81 # standard gravity
-
-        # Force and Moment:
-        self.f = self.m_nominal * self.g # magnitude of total thrust to overcome  
-                                 # gravity and mass (No air resistance), [N]
-        self.hover_force = self.m_nominal * self.g / 4.0 # thrust magnitude of each motor, [N]
-        self.min_force = 0.5 # minimum thrust of each motor, [N]
-        self.max_force = self.c_tw_nominal * self.hover_force # maximum thrust of each motor, [N]
-        self.avrg_act = (self.min_force+self.max_force)/2.0 
-        self.scale_act = self.max_force-self.avrg_act # actor scaling
-
 
     def setup_randomization(self, cfg):
         if not self.initialized:
@@ -311,8 +293,14 @@ class MultirotorBase(RobotBase):
             quat_rotate_inverse(self.rot, vel_w[..., :3]),
             quat_rotate_inverse(self.rot, vel_w[..., 3:])
         ], dim=-1)
-        self.vel_w[:] = vel_w
-        self.vel_b[:] = vel_b
+        self.vel_w[:] = vel_w  # in the world frame
+        self.vel_b[:] = vel_b  # in the body frame
+        '''
+        # https://omnidrones.readthedocs.io/en/devel/tutorials/tips.html
+        print("self.vel_w:", self.vel_w, "self.vel_b:", self.vel_b)
+        self.vel_w: tensor([[[ 1.3999,  0.5957,  0.0904,  1.8409,  0.8441, -1.2413]]], device='cuda:0') 
+        self.vel_b: tensor([[[ 0.3696, -1.3121,  0.6815,  0.0502, -2.3642, -0.2245]]], device='cuda:0')
+        '''
 
         # acc = self.acc.lerp((vel - self.vel) / self.dt, self.alpha)
         # self.acc[:] = acc
@@ -443,6 +431,7 @@ class MultirotorBase(RobotBase):
 
 
 def separation(p0, p1, p1_d):
+
     rel_pos = rel_pos =  p1.unsqueeze(0) - p0.unsqueeze(1)
     z_distance = (rel_pos * p1_d).sum(-1, keepdim=True)
     z_displacement = z_distance * p1_d

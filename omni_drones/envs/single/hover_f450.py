@@ -22,6 +22,7 @@
 
 import copy
 import math
+import random
 import torch
 import torch.distributions as D
 
@@ -30,7 +31,7 @@ import omni.isaac.core.utils.prims as prim_utils
 from omni_drones.envs.isaac_env import AgentSpec, IsaacEnv
 from omni_drones.robots.drone import MultirotorBase
 from omni_drones.views import ArticulationView, RigidPrimView
-from omni_drones.utils.torch import euler_to_quaternion, quat_axis, quaternion_to_rotation_matrix
+from omni_drones.utils.torch import euler_to_quaternion, quat_axis, quaternion_to_rotation_matrix, quat_rotate_inverse
 
 from tensordict.tensordict import TensorDict, TensorDictBase
 from torchrl.data import UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec
@@ -175,12 +176,20 @@ class Hover_F450(IsaacEnv):
         self.eIb1_lim = 3.0 
 
         self.init_pos_dist = D.Uniform(
-            torch.tensor([-self.x_lim, -self.x_lim, self.target_pos[0,-1]-1], device=self.device),
-            torch.tensor([self.x_lim, self.x_lim, self.target_pos[0,-1]+1], device=self.device)
+            torch.tensor([-self.x_lim*0.5, -self.x_lim*0.5, self.target_pos[0,-1]-(1.*0.5)], device=self.device),
+            torch.tensor([ self.x_lim*0.5,  self.x_lim*0.5, self.target_pos[0,-1]+(1.*0.5)], device=self.device)
         )
         self.init_rpy_dist = D.Uniform(
             torch.tensor([-self.rp_lim, -self.rp_lim, 0.], device=self.device) * torch.pi,
             torch.tensor([ self.rp_lim,  self.rp_lim, 2.], device=self.device) * torch.pi
+        )
+        self.init_pos_dist_goal = D.Uniform(
+            torch.tensor([self.target_pos[0,0]-0., self.target_pos[0,1]-0., self.target_pos[0,2]-0.], device=self.device),
+            torch.tensor([self.target_pos[0,0]+0., self.target_pos[0,1]+0., self.target_pos[0,2]+0.], device=self.device)
+        )
+        self.init_rpy_dist_goal = D.Uniform(
+            torch.tensor([-0., -0., 0.], device=self.device) * torch.pi,
+            torch.tensor([0., 0., 2.], device=self.device) * torch.pi
         )
         self.target_rpy_dist = D.Uniform(
             torch.tensor([0., 0., 0.], device=self.device) * torch.pi,
@@ -201,71 +210,6 @@ class Hover_F450(IsaacEnv):
             self.Cx + self.CIx + self.Cv + self.Cb1 + self.CIb1 + self.CW,
             device=self.device  # Keep it on the same device
         ))
-
-        if True:
-            ##################################################################################
-            self.g = 9.81 # standard gravity
-            # self.dt = 1/60
-            # Isaac Sim uses ENU frame, but NED frame is used in FDCL.
-            # Note that ENU and the NED here refer to their direction order.
-            # ENU: E - axis 1, N - axis 2, U - axis 3
-            # NED: N - axis 1, E - axis 2, D - axis 3
-            self.theta = 1.
-            pi_tensor, cos, sin = torch.tensor(math.pi), torch.cos, torch.sin
-            # Transformation matrices
-            self.R_fw = torch.tensor([
-                [1.0, 0.0, 0.0],
-                [0.0, cos(pi_tensor), -sin(pi_tensor)],
-                [0.0, sin(pi_tensor),  cos(pi_tensor)]
-            ], device=self.device)  # Transformation from Isaac-world-fixed frame(ENU) to the FDCL-fixed frame(NED)
-            self.R_bl = torch.tensor([
-                [1.0, 0.0, 0.0],
-                [0.0, cos(pi_tensor), -sin(pi_tensor)],
-                [0.0, sin(pi_tensor),  cos(pi_tensor)]
-            ], device=self.device)  # Transformation from Isaac-local-body frame(ENU) to the FDCL-body frame(NED)
-
-            #------ UAVs' properties ------#
-            self.crazyflie_x0 = torch.tensor([0., 0., 0.1], device=self.device)
-            self.scale_uav = 7
-            self.m_uav = (0.025 + 4*0.0008)*self.scale_uav
-            self.d = 0.0438*self.scale_uav
-            self.J = torch.diag(torch.tensor([1.4e-5, 1.4e-5, 2.17e-5], device=self.device) * self.scale_uav)  # inertia matrix
-            self.c_tf = 0.0135 # torque-to-thrust coefficients
-            self.c_tw = 2.25 # thrust-to-weight coefficients
-            self.hover_force = self.m_uav * self.g / 4.0 # thrust magnitude of each motor, [N]
-            self.min_force = -0.005 # minimum thrust of each motor, [N]
-            self.max_force = self.c_tw * self.hover_force # maximum thrust of each motor, [N]
-            self.prop_max_rot = 433.3
-            self.motor_assymetry = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)
-            self.motor_assymetry = self.motor_assymetry * 4.0 / torch.sum(self.motor_assymetry)
-            self.fM = torch.zeros((4, 1), device=self.device) # Force-moment vector
-            # Force-moment conversion matrix
-            fM_to_forces = torch.tensor([
-                [1.0,  1.0,  1.0,  1.0],
-                [self.d*cos(pi_tensor / 4),  self.d*cos(pi_tensor / 4), -self.d * cos(pi_tensor / 4), -self.d * cos(pi_tensor / 4)],
-                [self.d*sin(pi_tensor / 4), -self.d*sin(pi_tensor / 4), -self.d * sin(pi_tensor / 4),  self.d * sin(pi_tensor / 4)],
-                [-self.c_tf,           self.c_tf,            -self.c_tf,            self.c_tf]
-            ], device=self.device)
-            self.fM_to_forces_inv = torch.linalg.inv(fM_to_forces)
-
-            #---- PD control gains ----#
-            self.kX = 0.3 * torch.diag(torch.tensor([0.4, 0.4, 0.6], device=self.device))  # position gains  
-            self.kV = 3.0 * torch.diag(torch.tensor([0.2, 0.2, 0.4], device=self.device))  # velocity gains 
-            self.kX[2, 2] = 0.4
-
-            self.kR = 0.15 * torch.diag(torch.tensor([1.5, 1.5, 2.0], device=self.device))  # attitude gains 
-            self.kW = 0.15 * torch.diag(torch.tensor([0.8, 0.8, 1.5], device=self.device))  # angular velocity gains 
-
-            #---- Integral control ----#
-            # self.use_integral = False
-            # self.sat_sigma = 3.5
-            # self.eIX = IntegralErrorVec3() # Position integral error
-            # self.eIR = IntegralErrorVec3() # Attitude integral error
-            # self.eIX.set_zero() # Set all integrals to zero
-            # self.eIR.set_zero()
-            # #---- I control gains ----#
-            # self.kIX = 0.5 * torch.diag(torch.tensor([1.0, 1.0, 1.4]))  # Position integral gains
-            # self.kIR = 0.05 * torch.diag(torch.tensor([1.0, 1.0, 0.7]))  # Attitude integral gain
 
     def _design_scene(self):
         import omni_drones.utils.kit as kit_utils
@@ -354,10 +298,16 @@ class Hover_F450(IsaacEnv):
 
     def _reset_idx(self, env_ids: torch.Tensor):  # This method to reset sub-environment instances given by `env_ids`.
         self.drone._reset_idx(env_ids, self.training)
-        
-        # TODO: Spawning at the origin position and at zero angle (w/ random linear and angular velocity).
-        pos = self.init_pos_dist.sample((*env_ids.shape, 1))
-        rpy = self.init_rpy_dist.sample((*env_ids.shape, 1))
+
+        # Spawning at the origin position and at zero angle (w/ random linear and angular velocity).
+        rand_chance = random.random()  # generate a random float between 0.0 and 1.0
+        if rand_chance < 0.2: # 20% of the training
+            pos = self.init_pos_dist_goal.sample((*env_ids.shape, 1))
+            rpy = self.init_rpy_dist_goal.sample((*env_ids.shape, 1))
+        else:
+            pos = self.init_pos_dist.sample((*env_ids.shape, 1))
+            rpy = self.init_rpy_dist.sample((*env_ids.shape, 1))
+
         rot = euler_to_quaternion(rpy)
         self.drone.set_world_poses(
             pos + self.envs_positions[env_ids].unsqueeze(1), rot, env_ids
@@ -421,7 +371,7 @@ class Hover_F450(IsaacEnv):
         print(self.drone_state)
         tensor([[[-4.7240e-03,  1.7196e+00,  1.7196e+00,                                      # self.pos
                    1.7155e-01,  6.7446e-01, 5.9057e-01, -4.0854e-01,                          # self.rot
-                  -5.9773e-01,  3.9929e+00, -2.8783e+00,8.9692e+00, -1.7815e+01,  1.3727e+01, # self.vel (v, W)
+                  -5.9773e-01,  3.9929e+00, -2.8783e+00,8.9692e+00, -1.7815e+01,  1.3727e+01, # self.vel (v, W) in the world frame
                   -3.1348e-02,  6.5645e-01, -7.5372e-01,                                      # self.heading
                   -3.4846e-01, -7.1395e-01, -6.0733e-01,                                      # self.up
                    5.4139e-02, 5.4139e-02,  5.4139e-02,  5.4139e-02                           # self.throttle * 2 - 1
@@ -434,9 +384,39 @@ class Hover_F450(IsaacEnv):
         x = self.drone_state[..., :3]
         self.q = self.drone_state[..., 3:7]
         v = self.drone_state[..., 7:10]
-        W = self.drone_state[..., 10:13]
-        R = quaternion_to_rotation_matrix(self.q).squeeze(1) # Ensure R is in shape (num_UAVs, 3, 3); Remove the extra batch dimension if it exists
+        W_w = self.drone_state[..., 10:13]  # in the world frame
+        W = quat_rotate_inverse(self.q, W_w)  # in the body frame
+        '''
+        print("W_w:", W_w, "W:", W)
+        W_w: tensor([[[ 1.8409,  0.8441, -1.2413]]], device='cuda:0') 
+        W: tensor([[[ 0.0502, -2.3642, -0.2245]]], device='cuda:0')
+        '''
+        ###########################################################
+        # Normalize quaternion to prevent instability
+        self.q = self.q / self.q.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+        # Get rotation matrix
+        R = quaternion_to_rotation_matrix(self.q).reshape(self.q.shape[:-1] + (3, 3))
+        R = R.reshape(-1, 3, 3)  # Ensure shape is [N, 3, 3]
+
+        # Check orthogonality error
+        RtR = torch.matmul(R.transpose(-2, -1), R)
+        identity = torch.eye(3, device=R.device).expand_as(RtR)
+        error = torch.norm(RtR - identity, dim=(-2, -1)).max()
+
+        # Repair R if needed
+        if not torch.allclose(RtR, identity, atol=1e-2):
+            print("Correcting R to ensure it is a valid rotation matrix (SO(3))")
+            R = ensure_SO3(R)
+
+        # Sanity checks
+        assert not torch.isnan(R).any(), "NaNs in R"
+        assert not torch.isinf(R).any(), "Infs in R"
+
+        # Flatten R for downstream usage
         R_vec = R.permute(0, 2, 1).reshape(-1, 9)
+
+        ###########################################################
         b1 = self.drone_state[..., 13:16]
         b3 = self.drone_state[..., 16:19]
         # throttle = self.drone_state[..., 19:]
@@ -450,12 +430,35 @@ class Hover_F450(IsaacEnv):
         self.rpos = self.target_pos - self.drone_state[..., :3]
         self.rheading = self.target_heading - self.drone_state[..., 13:16]
 
-        obs = self.get_norm_error_state(state) #TODO:(self.framework) 
-        self.error_obs = copy.deepcopy(obs) # [ex_norm, self.eIx_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, self.eIb1_norm, eW_norm]
+        ###########################################################
+        # --- Dynamically compute desired angular velocity (Wd) from b1d and its derivative ---
+        b3 = quat_axis(self.q, axis=2).squeeze(1)  # (B, 3)
+        W = self.drone_state[..., 10:13].squeeze(1)  # (B, 3)
+        b3_dot = torch.cross(W, b3, dim=-1)  # (B, 3)
 
-        # R = state[2].squeeze(1)
-        # R_vec = R.permute(0, 2, 1).reshape(-1, 9)
-        # R = R_vec.reshape(-1, 3, 3).permute(0, 2, 1)
+        b1d = self.b1d.squeeze(1)  # (B, 3)
+        b1d_dot = self.b1d_dot.squeeze(1) if hasattr(self, 'b1d_dot') else torch.zeros_like(b1d)  # (B, 3)
+
+        dot_b1d_b3 = torch.sum(b1d * b3, dim=-1, keepdim=True)
+        dot_b1d_dot_b3 = torch.sum(b1d_dot * b3, dim=-1, keepdim=True)
+        dot_b1d_b3_dot = torch.sum(b1d * b3_dot, dim=-1, keepdim=True)
+
+        b1c = b1d - dot_b1d_b3 * b3
+        b1c_dot = b1d_dot - dot_b1d_dot_b3 * b3 - dot_b1d_b3_dot * b3 - dot_b1d_b3 * b3_dot
+
+        omega_c = torch.cross(b1c, b1c_dot, dim=-1)  # (B, 3)
+        omega_c_3 = torch.sum(b3 * omega_c, dim=-1, keepdim=True)  # (B, 1)
+
+        self.Wd = torch.cat([
+            torch.zeros_like(omega_c_3),
+            torch.zeros_like(omega_c_3),
+            omega_c_3
+        ], dim=-1).unsqueeze(1)  # (B, 1, 3)
+
+        ###########################################################
+
+        obs = self.get_norm_error_state(state) #TODO@ben:(self.framework) 
+        self.error_obs = copy.deepcopy(obs) # [ex_norm, self.eIx_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, self.eIb1_norm, eW_norm]
 
         #obs = [self.rpos, self.drone_state[..., 3:], self.rheading,]
 
@@ -486,6 +489,31 @@ class Hover_F450(IsaacEnv):
 
     def _compute_reward_and_done(self):  # This method to compute the reward and termination flags for the transition step.
         #self.error_obs = [ex_norm, self.eIx_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, self.eIb1_norm, eW_norm]
+        '''
+        print("self.error_obs:", self.error_obs)
+        [tensor([[[ 0.3106, -0.2540,  0.4745]],
+                 [[-0.9534,  0.1782,  0.0586]],
+                 [[-1.0321, -0.9352, -0.2108]]], device='cuda:0'), 
+            tensor([[[ 0.0183, -0.0138,  0.0705]],
+                    [[-0.0282,  0.0055,  0.0018]],
+                    [[-0.0772, -0.1986, -0.0317]]], device='cuda:0'), 
+            tensor([[[ 0.2943, -0.2503,  0.0588]],
+                    [[ 0.0542, -0.0719, -0.0276]],
+                    [[-0.6428,  0.0509, -0.1927]]], device='cuda:0'), 
+            tensor([[[-0.6070, -0.7935, -0.0435,  0.7096, -0.5166, -0.4791,  0.3577, -0.3217,  0.8767]],
+                    [[-0.1475, -0.9303, -0.3357,  0.9453, -0.0327, -0.3246,  0.2910, -0.3652,  0.8843]],
+                    [[ 0.7533,  0.6410, -0.1474, -0.5674,  0.5199, -0.6386, -0.3327, 0.5647,  0.7553]]], device='cuda:0'), 
+            tensor([[[ 0.2444]],
+                    [[-0.9313]],
+                    [[-0.0273]]], device='cuda:0'), 
+            tensor([[[ 0.4046]],
+                    [[-0.0857]],
+                    [[ 0.4008]]], device='cuda:0'), 
+            tensor([[[ 0.0551,  0.0566, -0.0741]],
+                    [[-0.0319,  0.0186,  0.0090]],
+                    [[-0.1220, -0.0514, -0.2298]]], device='cuda:0')]
+        '''
+
         ex_norm = self.error_obs[0]
         eIx_norm = self.error_obs[1]
         ev_norm = self.error_obs[2]
@@ -510,12 +538,32 @@ class Hover_F450(IsaacEnv):
 
         # Linearly scale reward from [reward_min, 0] → [0, 1]
         reward = (reward - self.reward_min) / (0.0 - self.reward_min)  # Equivalent to np.interp()
+        '''
+        print("reward:", reward)
+        reward: tensor([[0.7237],
+                        [0.1959],
+                        [0.1205]], device='cuda:0')
+        '''
 
         # pose reward
-        pos_error = torch.norm(self.rpos, dim=-1)
-        heading_alignment = torch.sum(self.drone.heading * self.target_heading, dim=-1)
+        
+        # pos_error = torch.norm(self.rpos, dim=-1)
+        # heading_alignment = torch.sum(self.drone.heading * self.target_heading, dim=-1)
+        # distance = torch.norm(torch.cat([self.rpos, self.rheading], dim=-1), dim=-1)
+        # misbehave = (self.drone.pos[..., 2] < 0.2) | (distance > 4) | (ev_norm.abs() >= 1.0).any(dim=-1) | (eW_norm.abs() >= 1.0).any(dim=-1)
+        '''
+        print("self.rpos:", self.rpos, "self.rheading:", self.rheading, "distance:", distance)
+        self.rpos: tensor([[[ 0.7938, -0.8114, -0.3564]],
+                            [[ 0.5842,  0.4034,  0.9982]],
+                            [[-0.2099,  0.9195,  0.8527]]], device='cuda:0') 
+        self.rheading: tensor([[[-0.7553,  1.8000, -0.3045]],
+                                [[-1.6507, -0.3297, -0.1090]],
+                                [[ 1.4378, -1.2975,  0.3501]]], device='cuda:0') 
+        distance: tensor([[2.3062],
+                        [2.0847],
+                        [2.3431]], device='cuda:0')
+        '''
 
-        distance = torch.norm(torch.cat([self.rpos, self.rheading], dim=-1), dim=-1)
         '''
         reward_pose = 1.0 / (1.0 + torch.square(self.reward_distance_scale * distance))
         # pose_reward = torch.exp(-distance * self.reward_distance_scale)
@@ -541,15 +589,44 @@ class Hover_F450(IsaacEnv):
         )
         '''
 
-        misbehave = (self.drone.pos[..., 2] < 0.2) | (distance > 4)
-        hasnan = torch.isnan(self.drone_state).any(-1)
+        pos_error = (torch.norm(ex_norm, dim=-1, keepdim=True)).squeeze(-1)*self.x_lim
+        heading_alignment = torch.abs(eb1_norm).squeeze(-1)*torch.pi
+        '''
+        print("pos_error:", pos_error, "heading_alignment:", heading_alignment)
+        pos_error: tensor([[0.6214],
+                           [0.9716],
+                           [1.4086]], device='cuda:0') 
+        heading_alignment: tensor([[0.7677],
+                                   [2.9259],
+                                   [0.0857]], device='cuda:0')
 
+        '''
+
+        misbehave = (
+            (ex_norm.abs() >= 1.0).any(dim=-1) 
+            | (ev_norm.abs() >= 1.0).any(dim=-1) 
+            | (eW_norm.abs() >= 1.0).any(dim=-1) 
+            |(self.drone.pos[..., 2] < 0.2)
+        )
+        '''
+        print("misbehave:", misbehave)
+        misbehave: tensor([[False],
+                           [False],
+                           [ True]], device='cuda:0')
+        '''
+
+        hasnan = torch.isnan(self.drone_state).any(-1)
+        
         terminated = misbehave | hasnan
         truncated = (self.progress_buf >= self.max_episode_length).unsqueeze(-1)
-        ''' TODO
+
         # Terminal condition (Out of boundary or crashed!)
-        if terminated or truncated:
-            reward = self.reward_crash
+        reward[misbehave] = self.reward_crash
+        '''
+        print("reward:", reward)
+        reward: tensor([[ 0.7237],
+                        [ 0.1959],
+                        [-1.0000]], device='cuda:0')
         '''
 
         self.stats["pos_error"].lerp_(pos_error, (1-self.alpha))
@@ -571,13 +648,10 @@ class Hover_F450(IsaacEnv):
             self.batch_size,
         )
     
-    def get_norm_error_state(self, state):#, framework): #TODO: framework
+    """
+    def get_norm_error_state(self, state):#, framework): #TODO@ben: framework
         # Normalize state vectors: [max, min] -> [-1, 1]
         x_norm, v_norm, R_vec, W_norm = state_normalization(state, self.x_lim, self.v_lim, self.W_lim)
-        '''
-        x_norm, v_norm, R_vec, W_norm = state_normalization(self.state, self.x_lim, self.v_lim, self.W_lim)
-        R = R_vec.reshape(3, 3, order='F')
-        '''
 
         # Normalize goal state vectors: [max, min] -> [-1, 1]
         xd_norm = self.xd/self.x_lim
@@ -588,9 +662,6 @@ class Hover_F450(IsaacEnv):
         ex_norm = x_norm - xd_norm # norm pos error
         ev_norm = v_norm - vd_norm # norm vel error
         eW_norm = W_norm - Wd_norm # norm ang vel error
-        '''
-        eW3_norm = W_norm[2] - Wd_norm[2]
-        '''
 
         # Compute yaw angle error: 
         b1 = quat_axis(self.q, axis=0)  # Shape: (batch_size, 1, 3)
@@ -633,23 +704,151 @@ class Hover_F450(IsaacEnv):
         # R = R_vec.reshape(-1, 3, 3).permute(0, 2, 1)
         # error_obs = [ex_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, eW_norm]
         error_obs = [ex_norm, self.eIx_norm, ev_norm, R_vec.unsqueeze(1), eb1_norm, self.eIb1_norm, eW_norm]
-        """
-        if framework in ("CMP","DMP"):
-            # Agent1's obs:
-            ew12_norm = eW_norm[0]*b1 + eW_norm[1]*b2
-            obs_1 = np.concatenate((ex_norm, self.eIx_norm, ev_norm, b3, ew12_norm), axis=None, dtype=np.float32)
-            # Agent2's obs:
-            '''
-            eW3_norm = eW_norm[2]
-            '''
-            obs_2 = np.concatenate((b1, eb1_norm, self.eIb1_norm, eW3_norm), axis=None, dtype=np.float32)
-            error_obs_n = [obs_1, obs_2]
-        elif framework == "NMP":
+
+        return 
+    """
+
         
-        return error_obs_n
+    def get_norm_error_state(self, state):
         """
+        Compute normalized error observations in the ENU frame (Isaac Sim default).
+        Includes position, velocity, rotation, yaw alignment, and angular velocity errors.
+        All inputs and outputs are assumed to follow ENU convention:
+            - X: East
+            - Y: North
+            - Z: Up
+
+        Returns:
+            error_obs: list of tensors:
+                [ex_norm, eIx_norm, ev_norm, R_vec, eb1_norm, eIb1_norm, eW_norm]
+        """
+        # 1. Normalize state vectors: [x, v, R_vec, W]
+        x_norm, v_norm, R_vec, W_norm = state_normalization(
+            state, self.x_lim, self.v_lim, self.W_lim
+        )
+
+        # 2. Normalize desired (goal) states
+        xd_norm = self.xd / self.x_lim
+        vd_norm = self.vd / self.v_lim
+        Wd_norm = self.Wd / self.W_lim
+
+        # 3. Compute normalized tracking errors
+        ex_norm = x_norm - xd_norm
+        ev_norm = v_norm - vd_norm
+        eW_norm = W_norm - Wd_norm
+
+        # 4. Extract body axes from quaternion (ENU world frame)
+        b1 = quat_axis(self.q, axis=0)  # forward
+        b2 = quat_axis(self.q, axis=1)  # left
+        b3 = quat_axis(self.q, axis=2)  # up
+
+        # 5. Compute yaw (heading) alignment error
+        dot_b1d_b3 = torch.einsum('bnd,bnd->bn', self.b1d, b3).unsqueeze(-1)  # shape (B, 1, 1)
+        b1c = self.b1d - dot_b1d_b3 * b3  # desired heading projected into horizontal plane
+
+        numerator = torch.einsum('bnd,bnd->bn', b1c, b2).unsqueeze(-1)
+        denominator = torch.einsum('bnd,bnd->bn', b1c, b1).unsqueeze(-1)
+        eb1 = torch.atan2(-numerator, denominator)  # heading angle error
+        eb1_norm = eb1 / torch.pi
+
+        # 6. Update and normalize integral position error
+        ex = ex_norm * self.x_lim
+        eIx_integrand = -self.alpha * self.eIx.error + ex
+        self.eIx.integrate(eIx_integrand, self.dt)
+        self.eIx_norm = torch.clamp(
+            self.eIx.error / self.eIx_lim,
+            min=-self.sat_sigma,
+            max=self.sat_sigma
+        )
+
+        # 7. Update and normalize integral heading error
+        eIb1_integrand = -self.beta * self.eIb1.error + eb1
+        self.eIb1.integrate(eIb1_integrand, self.dt)
+        self.eIb1_norm = torch.clamp(
+            self.eIb1.error / self.eIb1_lim,
+            min=-self.sat_sigma,
+            max=self.sat_sigma
+        )
+
+        # 8. Return full error observation
+        error_obs = [
+            ex_norm,
+            self.eIx_norm,
+            ev_norm,
+            R_vec.unsqueeze(1),  # (B, 1, 9)
+            eb1_norm,
+            self.eIb1_norm,
+            eW_norm
+        ]
+
         return error_obs
-        
+
+
+
+        """
+        ##################################################################################
+        self.g = 9.81 # standard gravity
+        # self.dt = 1/60
+        # Isaac Sim uses ENU frame, but NED frame is used in FDCL.
+        # Note that ENU and the NED here refer to their direction order.
+        # ENU: E - axis 1, N - axis 2, U - axis 3
+        # NED: N - axis 1, E - axis 2, D - axis 3
+        self.theta = 1.
+        pi_tensor, cos, sin = torch.tensor(math.pi), torch.cos, torch.sin
+        # Transformation matrices
+        self.R_fw = torch.tensor([
+            [1.0, 0.0, 0.0],
+            [0.0, cos(pi_tensor), -sin(pi_tensor)],
+            [0.0, sin(pi_tensor),  cos(pi_tensor)]
+        ], device=self.device)  # Transformation from Isaac-world-fixed frame(ENU) to the FDCL-fixed frame(NED)
+        self.R_bl = torch.tensor([
+            [1.0, 0.0, 0.0],
+            [0.0, cos(pi_tensor), -sin(pi_tensor)],
+            [0.0, sin(pi_tensor),  cos(pi_tensor)]
+        ], device=self.device)  # Transformation from Isaac-local-body frame(ENU) to the FDCL-body frame(NED)
+
+        #------ UAVs' properties ------#
+        self.crazyflie_x0 = torch.tensor([0., 0., 0.1], device=self.device)
+        self.scale_uav = 7
+        self.m_uav = (0.025 + 4*0.0008)*self.scale_uav
+        self.d = 0.0438*self.scale_uav
+        self.J = torch.diag(torch.tensor([1.4e-5, 1.4e-5, 2.17e-5], device=self.device) * self.scale_uav)  # inertia matrix
+        self.c_tf = 0.0135 # torque-to-thrust coefficients
+        self.c_tw = 2.25 # thrust-to-weight coefficients
+        self.hover_force = self.m_uav * self.g / 4.0 # thrust magnitude of each motor, [N]
+        self.min_force = -0.005 # minimum thrust of each motor, [N]
+        self.max_force = self.c_tw * self.hover_force # maximum thrust of each motor, [N]
+        self.prop_max_rot = 433.3
+        self.motor_assymetry = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)
+        self.motor_assymetry = self.motor_assymetry * 4.0 / torch.sum(self.motor_assymetry)
+        self.fM = torch.zeros((4, 1), device=self.device) # Force-moment vector
+        # Force-moment conversion matrix
+        fM_to_forces = torch.tensor([
+            [1.0,  1.0,  1.0,  1.0],
+            [self.d*cos(pi_tensor / 4),  self.d*cos(pi_tensor / 4), -self.d * cos(pi_tensor / 4), -self.d * cos(pi_tensor / 4)],
+            [self.d*sin(pi_tensor / 4), -self.d*sin(pi_tensor / 4), -self.d * sin(pi_tensor / 4),  self.d * sin(pi_tensor / 4)],
+            [-self.c_tf,           self.c_tf,            -self.c_tf,            self.c_tf]
+        ], device=self.device)
+        self.fM_to_forces_inv = torch.linalg.inv(fM_to_forces)
+
+        #---- PD control gains ----#
+        self.kX = 0.3 * torch.diag(torch.tensor([0.4, 0.4, 0.6], device=self.device))  # position gains  
+        self.kV = 3.0 * torch.diag(torch.tensor([0.2, 0.2, 0.4], device=self.device))  # velocity gains 
+        self.kX[2, 2] = 0.4
+
+        self.kR = 0.15 * torch.diag(torch.tensor([1.5, 1.5, 2.0], device=self.device))  # attitude gains 
+        self.kW = 0.15 * torch.diag(torch.tensor([0.8, 0.8, 1.5], device=self.device))  # angular velocity gains 
+
+        #---- Integral control ----#
+        # self.use_integral = False
+        # self.sat_sigma = 3.5
+        # self.eIX = IntegralErrorVec3() # Position integral error
+        # self.eIR = IntegralErrorVec3() # Attitude integral error
+        # self.eIX.set_zero() # Set all integrals to zero
+        # self.eIR.set_zero()
+        # #---- I control gains ----#
+        # self.kIX = 0.5 * torch.diag(torch.tensor([1.0, 1.0, 1.4]))  # Position integral gains
+        # self.kIR = 0.05 * torch.diag(torch.tensor([1.0, 1.0, 0.7]))  # Attitude integral gain
 
     def get_drone_body_pos_rot(self):
         drone_body_position, drone_body_orientation = self.drone.base_link.get_world_poses(clone=False)
@@ -825,3 +1024,4 @@ class Hover_F450(IsaacEnv):
         # M_w = np.array([0.0, 0.001, 0.0], device=self.device)
         # print(f"f_b: {self.f_b}, f_l: {self.f_l}, f_w: {self.f_w}")
         # print(f"M_b: {self.M_b}, M_c: {self.M_c}, M_l: {self.M_l}, M_w: {self.M_w}")
+        """

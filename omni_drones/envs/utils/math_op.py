@@ -144,27 +144,49 @@ class IntegralError:
         self.error.zero_()
         self.integrand.zero_()
 
-
-def ensure_SO3(R, tolerance=1e-6):
-    """ Make sure the given input array is in SO(3).
+def ensure_SO3(R: torch.Tensor) -> torch.Tensor:
+    """
+    Project a near-rotation matrix to the closest proper rotation matrix in SO(3) using SVD.
 
     Args:
-        x: (3x3 numpy array) matrix
-        tolerance: Tolerance level for considering the magnitude as 1
+        R: (..., 3, 3) rotation matrix
 
     Returns:
-        True if the input array is in SO(3). Raises an exception otherwise.
+        R_proj: (..., 3, 3) corrected rotation matrix in SO(3)
     """
-    # Calculate the magnitude (norm) of the matrix
-    magnitude = torch.det(R)
+    U, _, Vh = torch.linalg.svd(R)
+    R_proj = U @ Vh
 
-    # R matrix should satisfy R^T@R = I and det(R) = 1:
-    if torch.allclose(R.T @ R, torch.eye(3, device=R.device), rtol=tolerance) and torch.isclose(magnitude, torch.tensor(1.0, device=R.device), rtol=tolerance):
-        return R
-    else: 
-        U, s, VT = psvd(R)
-        R = U @ VT.T # Re-orthonormalized R
-        return R
+    # Ensure right-handedness (i.e., det(R) = +1)
+    det = torch.det(R_proj)
+    mask = det < 0
+    if mask.any():
+        Vh[mask, 2, :] *= -1  # Flip last row of V^T
+        R_proj[mask] = U[mask] @ Vh[mask]
+
+    return R_proj
+
+
+# def ensure_SO3(R, tolerance=1e-6):
+#     """ Make sure the given input array is in SO(3).
+
+#     Args:
+#         x: (3x3 numpy array) matrix
+#         tolerance: Tolerance level for considering the magnitude as 1
+
+#     Returns:
+#         True if the input array is in SO(3). Raises an exception otherwise.
+#     """
+#     # Calculate the magnitude (norm) of the matrix
+#     magnitude = torch.det(R)
+
+#     # R matrix should satisfy R^T@R = I and det(R) = 1:
+#     if torch.allclose(R.T @ R, torch.eye(3, device=R.device), rtol=tolerance) and torch.isclose(magnitude, torch.tensor(1.0, device=R.device), rtol=tolerance):
+#         return R
+#     else: 
+#         U, s, VT = psvd(R)
+#         R = U @ VT.T # Re-orthonormalized R
+#         return R
     
 def psvd(A):
     assert A.shape == (3, 3)
