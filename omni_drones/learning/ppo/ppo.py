@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as D
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 from torchrl.data import CompositeSpec, TensorSpec
 from torchrl.modules import ProbabilisticActor
@@ -38,39 +39,45 @@ from typing import Union
 import einops
 
 from ..utils.valuenorm import ValueNorm1
-from ..modules.distributions import IndependentNormal
+from ..modules.distributions import IndependentNormal, TanhIndependentNormal
+from torchrl.modules.distributions import TanhNormal
 from .common import GAE
 
 @dataclass
 class PPOConfig:
     name: str = "ppo"
 
-    lr_a: float = 5e-4 #3e-4  #(default: 5e-4)
-    lr_c: float = 5e-4 #2e-4  #(default: 5e-4)
+    lr_a: float = 3e-4  #(default: 5e-4)
+    lr_c: float = 2e-4  #(default: 5e-4)
+    eta_min: float = 1e-5
+    scheduler_T_0: int = 50_000_000
 
-    train_every: int = 2048  #(default: 32)
-    ppo_epochs: int = 4  #(default: 4)
-    num_minibatches: int = 16  #(default: 16)
-    entropy_coef: float = 0.001  #(default: 0.001)
-    clip_param: float = 0.1  #(default: 0.1)
+    train_every: int = 1024  #(default: 32)
+    ppo_epochs: int = 20  #(default: 4)
+    num_minibatches: int = 128  #(default: 16)
+    clip_param: float = 0.2  #(default: 0.1)
+    entropy_coef: float = 0.01  #(default: 0.001)
+    entropy_coef_final: float = 0.001
+    entropy_decay_steps: int = 300
 
     gamma: float = 0.99  #(default: 0.99)
     GAE_lambda: float = 0.9  #(default: 0.95)
-    grad_max_norm: float = 5  #(default: 5)
+    grad_max_norm: float = 10  #(default: 5)
     
     # network size
     actor_hidden_dim: int = 16  #(default: [256, 256, 256])
     critic_hidden_dim: int = 256  #(default: [256, 256, 256])
 
-    lam_T: float = 0.1 #(default: 0.4)
-    lam_S: float = 0.05 #(default: 0.3)
-    lam_M: float = 0.2 #(default: 0.6)
+    lam_T: float = 0.4 #(default: 0.4)
+    lam_S: float = 0.3 #(default: 0.3)
+    lam_M: float = 0.6 #(default: 0.6)
 
     # whether to use privileged information
     priv_actor: bool = False
     priv_critic: bool = False
 
     checkpoint_path: Union[str, None] = None
+
 
 cs = ConfigStore.instance()
 cs.store("ppo", node=PPOConfig, group="algo")
@@ -95,14 +102,20 @@ class Actor(nn.Module):
 
     def forward(self, features: torch.Tensor):
         loc = self.actor_mean(features)
-        # loc = torch.tanh(self.actor_mean(features)) # TODO: Try tanh to ensure the output is [-1, 1]
         '''
         print("loc:",loc)
             tensor([[[ 0.9240, -0.9794,  0.8404, -0.8992]]], device='cuda:0')
             tensor([[[ 0.9201, -0.9782,  0.8411, -0.9013]]], device='cuda:0')
             tensor([[[ 0.9162, -0.9746,  0.8244, -0.9049]]], device='cuda:0')
         '''
-        scale = torch.exp(self.actor_std).expand_as(loc) # TODO: Try * 0. to make it deterministic
+        # loc = torch.tanh(self.actor_mean(features)) # TODO@ben: Try tanh to ensure the output is [-1, 1]?
+        '''
+        print("loc_tanh:",loc)
+            tensor([[[ 0.9240, -0.9794,  0.8404, -0.8992]]], device='cuda:0')
+            tensor([[[ 0.9201, -0.9782,  0.8411, -0.9013]]], device='cuda:0')
+            tensor([[[ 0.9162, -0.9746,  0.8244, -0.9049]]], device='cuda:0')
+        '''
+        scale = torch.exp(self.actor_std).expand_as(loc) # TODO@ben: Try * 0. to make it deterministic
         return loc, scale
 
 
@@ -119,23 +132,6 @@ class PPOPolicy(TensorDictModuleBase):
         super().__init__()
         self.cfg = cfg
         self.device = device
-
-        # Nominal value of quadrotor parameters:
-        self.m_nominal = 2.15 # mass of quad, [kg]
-        self.d_nominal = 0.23 # arm length, [m]
-        self.J = torch.diag(torch.tensor([0.022, 0.022, 0.035], device=self.device)) # inertia matrix of quad, [kg m2]
-        self.c_tf_nominal = 0.0135 # torque-to-thrust coefficients
-        self.c_tw_nominal = 2.2 # thrust-to-weight coefficients
-        self.g = 9.81 # standard gravity
-
-        # Force and Moment:
-        self.f = self.m_nominal * self.g # magnitude of total thrust to overcome  
-                                 # gravity and mass (No air resistance), [N]
-        self.hover_force = self.m_nominal * self.g / 4.0 # thrust magnitude of each motor, [N]
-        self.min_force = 0.5 # minimum thrust of each motor, [N]
-        self.max_force = self.c_tw_nominal * self.hover_force # maximum thrust of each motor, [N]
-        self.avrg_act = (self.min_force+self.max_force)/2.0 
-        self.scale_act = self.max_force-self.avrg_act # actor scaling
         self.max_action = 1.
 
         self.entropy_coef = self.cfg.entropy_coef
@@ -165,7 +161,7 @@ class PPOPolicy(TensorDictModuleBase):
                 )
             )
         else:
-            """ default
+            """
             actor_module=TensorDictModule(
                 nn.Sequential(make_mlp([256, 256, 256]), Actor(self.action_dim)),
                 [("agents", "observation")], ["loc", "scale"]
@@ -175,12 +171,12 @@ class PPOPolicy(TensorDictModuleBase):
                 nn.Sequential(make_mlp([self.cfg.actor_hidden_dim, self.cfg.actor_hidden_dim]), Actor(self.action_dim)),
                 [("agents", "observation")], ["loc", "scale"]
             )
-        # TODO: Here is an actor net
+
         self.actor: ProbabilisticActor = ProbabilisticActor(
             module=actor_module,
             in_keys=["loc", "scale"],
             out_keys=[("agents", "action")],
-            distribution_class=IndependentNormal,
+            distribution_class=TanhNormal, #TanhIndependentNormal #IndependentNormal #TanhNormal
             return_log_prob=True
         ).to(self.device)
 
@@ -199,7 +195,7 @@ class PPOPolicy(TensorDictModuleBase):
                 )
             ).to(self.device)
         else:
-            """ default
+            """
             self.critic = TensorDictModule(
                 nn.Sequential(make_mlp([256, 256, 256]), nn.LazyLinear(1)),
                 [("agents", "observation")], ["state_value"]
@@ -219,7 +215,7 @@ class PPOPolicy(TensorDictModuleBase):
         else:
             def init_(module):
                 if isinstance(module, nn.Linear):
-                    nn.init.orthogonal_(module.weight, 0.01)  #Ben: 0.1
+                    nn.init.orthogonal_(module.weight, 0.1)  #Ben: 0.1
                     nn.init.constant_(module.bias, 0.)
 
             self.actor.apply(init_)
@@ -229,13 +225,59 @@ class PPOPolicy(TensorDictModuleBase):
         self.critic_opt = torch.optim.AdamW(self.critic.parameters(), lr=self.cfg.lr_c)  #(default: Adam)
         self.value_norm = ValueNorm1(reward_spec.shape[-2:]).to(self.device)
 
+        # Add cosine annealing with warm restarts
+        self.actor_scheduler = CosineAnnealingWarmRestarts(self.actor_opt, T_0=self.cfg.scheduler_T_0, eta_min=self.cfg.eta_min)
+        self.critic_scheduler = CosineAnnealingWarmRestarts(self.critic_opt, T_0=self.cfg.scheduler_T_0, eta_min=self.cfg.eta_min)
+
+    def get_entropy_coef(self, current_step: int):
+        frac = min(current_step / self.cfg.entropy_decay_steps, 1.0)
+        return self.cfg.entropy_coef * (1.0 - frac) + self.cfg.entropy_coef_final * frac
+
     def __call__(self, tensordict: TensorDict):
         self.actor(tensordict)
         self.critic(tensordict)
         tensordict.exclude("loc", "scale", "feature", inplace=True)
         return tensordict
 
-    def train_op(self, tensordict: TensorDict):
+    def train_op(self, tensordict: TensorDict, i: int):
+        '''
+        print(tensordict["agents"]["intrinsics"])
+        print(tensordict["agents"]["intrinsics"]["mass"])
+        TensorDict(
+            fields={
+                c_tf: Tensor(shape=torch.Size([3, 2048, 1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                com: Tensor(shape=torch.Size([3, 2048, 1, 3]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                inertia: Tensor(shape=torch.Size([3, 2048, 1, 3]), device=cuda:0, dtype=torch.float32, is_shared=True),
+                mass: Tensor(shape=torch.Size([3, 2048, 1, 1]), device=cuda:0, dtype=torch.float32, is_shared=True)},
+            batch_size=torch.Size([3, 2048, 1]),
+            device=cuda:0,
+            is_shared=True)
+
+        tensor([[[[2.9403]],
+                [[2.9403]],
+                [[2.9403]],
+                ...,
+                [[2.9403]],
+                [[2.9403]],
+                [[2.9403]]],
+
+                [[[2.5119]],
+                [[2.5119]],
+                [[2.5119]],
+                ...,
+                [[2.5119]],
+                [[2.5119]],
+                [[2.5119]]],
+
+                [[[2.3941]],
+                [[2.3941]],
+                [[2.3941]],
+                ...,
+                [[2.3941]],
+                [[2.3941]],
+                [[2.3941]]]], device='cuda:0')
+        '''
+
         next_tensordict = tensordict["next"]
         with torch.no_grad():
             next_values = self.critic(next_tensordict)["state_value"]
@@ -263,19 +305,21 @@ class PPOPolicy(TensorDictModuleBase):
         for epoch in range(self.cfg.ppo_epochs):
             batch = make_batch(tensordict, self.cfg.num_minibatches)
             for minibatch in batch:
-                infos.append(self._update(minibatch))
+                infos.append(self._update(minibatch, i))
 
         infos: TensorDict = torch.stack(infos).to_tensordict()
         infos = infos.apply(torch.mean, batch_size=[])
         return {k: v.item() for k, v in infos.items()}
 
-    def _update(self, tensordict: TensorDict):
+    def _update(self, tensordict: TensorDict, i: int):
 
         # Prepare obs and next_obs for regularization
+        '''
         obs = tensordict[("agents", "observation")]
         next_obs = tensordict[("next", "agents", "observation")]
+        print("act:", self.actor(obs))
+        print("next_act:", self.actor(next_obs))
 
-        '''
         loc: tensor([[[...]]]),
         scale: tensor([[[...]]]),
         sample: tensor([[[...]]]),      # ≠ tensordict["action"]
@@ -331,7 +375,11 @@ class PPOPolicy(TensorDictModuleBase):
 
         dist = self.actor.get_dist(tensordict)
         log_probs = dist.log_prob(tensordict[("agents", "action")])
-        entropy = dist.entropy()
+        # entropy = dist.entropy()
+        if hasattr(dist, "base_dist"):  #if TanhNormal:
+            entropy = dist.base_dist.entropy()
+        else:
+            entropy = dist.entropy()
 
         adv = tensordict["adv"]
         ratio = torch.exp(log_probs - tensordict["sample_log_prob"]).unsqueeze(-1)
@@ -339,9 +387,11 @@ class PPOPolicy(TensorDictModuleBase):
         surr2 = adv * ratio.clamp(1.-self.clip_param, 1.+self.clip_param)
         policy_loss = -torch.mean(torch.min(surr1, surr2)) * self.action_dim
         # Regularizing action policies for smooth and efficient control
-        policy_loss = self.policy_regularization(self.actor, policy_loss, obs, next_obs)
+        policy_loss = self.policy_regularization(self.actor, policy_loss, tensordict)
 
-        entropy_loss = - self.entropy_coef * torch.mean(entropy)
+        entropy_coef = self.get_entropy_coef(i)  # i == current_step
+        entropy_loss = - entropy_coef * torch.mean(entropy)
+        # entropy_loss = - self.entropy_coef * torch.mean(entropy)
 
         b_values = tensordict["state_value"]
         b_returns = tensordict["ret"]
@@ -361,6 +411,8 @@ class PPOPolicy(TensorDictModuleBase):
         critic_grad_norm = nn.utils.clip_grad.clip_grad_norm_(self.critic.parameters(), self.cfg.grad_max_norm)
         self.actor_opt.step()
         self.critic_opt.step()
+        self.actor_scheduler.step()
+        self.critic_scheduler.step()
         explained_var = 1 - F.mse_loss(values, b_returns) / b_returns.var()
         return TensorDict({
             "policy_loss": policy_loss,
@@ -372,7 +424,10 @@ class PPOPolicy(TensorDictModuleBase):
         }, [])
 
     # Regularizing action policies for smooth control
-    def policy_regularization(self, actor, actor_loss, batch_obs, batch_obs_next):#, env, args):
+    def policy_regularization(self, actor, actor_loss, tensordict):
+        batch_obs = tensordict[("agents", "observation")]
+        batch_obs_next = tensordict[("next", "agents", "observation")]
+
         # Retrieving a recent set of actions:
         batch_act = actor(batch_obs)[0].clamp(-self.max_action, self.max_action)
         batch_act_next = actor(batch_obs_next)[0].clamp(-self.max_action, self.max_action)
@@ -386,25 +441,35 @@ class PPOPolicy(TensorDictModuleBase):
         batch_act_perturbed = actor(batch_obs + noise_S)[0].clamp(-self.max_action, self.max_action)  # Perturbed actions
         Loss_S = F.mse_loss(batch_act, batch_act_perturbed)
 
-        # Magnitude Smoothness:
+        # Magnitude Smoothness (adaptive to mass and c_tw per env):
         batch_size = batch_act.shape[0]
         # f_total_hover = np.interp(4.*env.hover_force, 
         #                             [4.*env.min_force, 4.*env.max_force], 
         #                             [-args.max_action, args.max_action]
         #                 ) * torch.ones(batch_size, 1) # normalized into [-1, 1]
         # Linearly map 4 * hover_force from [4 * min_force, 4 * max_force] to [-max_action, max_action]
-        
-        hover_force_raw = 4.0 * self.hover_force
-        min_raw = 4.0 * self.min_force
-        max_raw = 4.0 * self.max_force
-        # Normalize to [-1, 1]
-        f_total_hover = (hover_force_raw - min_raw) / (max_raw - min_raw) * (2 * self.max_action) - self.max_action
-        # Expand to batch
-        f_total_hover = f_total_hover * torch.ones(batch_size, 1, device=self.device) 
 
-        M_hover = torch.zeros(batch_size, 3).to(self.device)
-        nominal_action = torch.cat([f_total_hover, M_hover], 1).to(self.device)
-        nominal_action = nominal_action.unsqueeze(1)  # [B, A] -> [B, 1, A]
+        # Access mass and thrust-to-weight coeffs from intrinsics
+        masses = tensordict["agents"]["intrinsics"]["mass"]
+        total_masses = masses + (0.099*4)  # because each rotor's mass = 0.099
+        c_tfs = tensordict["agents"]["intrinsics"]["c_tf"]
+
+        # Compute hover force per env: f = m * g / 4
+        hover_force = total_masses*9.81/4.  # hovering thrust magnitude of each motor, [N]
+        max_force = c_tfs * hover_force  # maximum thrust of each motor, [N]
+        min_force = torch.full_like(max_force, 0.5) # minimum thrust of each motor, 0.5 [N]
+
+        # Normalize to [-1, 1] range
+        f_total_hover = (4*hover_force - 4*min_force) / (4*max_force - 4*min_force) * 2 - 1
+        M_hover = torch.zeros(batch_size, 1, 3).to(self.device)
+        nominal_action = torch.cat([f_total_hover, M_hover], dim=-1)
+        '''
+        print("nominal_action:", nominal_action)
+        tensor([[[-0.1025,  0.0000,  0.0000,  0.0000]],
+                [[-0.1206,  0.0000,  0.0000,  0.0000]],
+                [[-0.1206,  0.0000,  0.0000,  0.0000]]], device='cuda:0')
+        '''
+
         Loss_M = F.mse_loss(batch_act, nominal_action)
 
         # Regularized actor loss for smooth control:

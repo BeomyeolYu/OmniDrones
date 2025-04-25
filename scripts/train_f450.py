@@ -181,7 +181,7 @@ def main(cfg):
             return_value = stats['train/stats.return']
             info.update(stats)
 
-        info.update(policy.train_op(data.to_tensordict()))
+        info.update(policy.train_op(data.to_tensordict(),i))
 
         if eval_interval > 0 and i % eval_interval == 0:
             logging.info(f"Eval at {collector._frames} steps.")
