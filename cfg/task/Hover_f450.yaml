@@ -6,7 +6,7 @@ defaults:
   - /base/sim_base@_here_
 
 env:
-  num_envs: 512  #(default: 128)
+  num_envs: 256 #512  #(default: 128)
   env_spacing: 6
   max_episode_length: 500 #(default: 500)
 
@@ -19,10 +19,10 @@ time_encoding: false
 randomization:
   drone:
     train:
-      mass_scale: [0.8, 1.2]
-      inertia_scale: [0.8, 1.2]
-      c_tf_scale: [0.8, 1.2]
-      com: [-0.05, 0.05]
+      mass_scale: [0.85, 1.15]
+      inertia_scale: [0.85, 1.15]
+      c_tf_scale: [0.85, 1.15]
+      com: [-0.03, 0.03]
 
 #       t2w_scale: [0.5556, 2.23]
 #       f2m_scale: [0.625, 2.5]

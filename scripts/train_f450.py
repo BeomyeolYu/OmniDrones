@@ -105,7 +105,7 @@ def main(cfg):
         device=cfg.sim.device,
         return_same_td=True,
     )
-    best_return_value, return_value = base_env.max_episode_length*0.9, 0.  # to save the best model
+    best_return_value, return_value = base_env.max_episode_length*0.8, 0.  # to save the best model
 
     # print(env.input_spec)
     # print(env.output_spec)

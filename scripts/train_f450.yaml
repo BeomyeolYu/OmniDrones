@@ -4,7 +4,7 @@ hydra:
     # see https://hydra.cc/docs/advanced/search_path/
     - file://../cfg
 
-headless: true #false
+headless: true #false #true
 
 
 sim: ${task.sim}
@@ -33,6 +33,6 @@ wandb:
   tags:
 
 defaults:
-  - task: Hover_f450
+  - task: Hover_f450 #InvPendulumHover_f450 #PayloadHover_f450 #Hover_f450
   - algo: ppo
   - _self_

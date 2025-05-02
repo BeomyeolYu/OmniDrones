@@ -43,6 +43,8 @@ from ..modules.distributions import IndependentNormal, TanhIndependentNormal
 from torchrl.modules.distributions import TanhNormal
 from .common import GAE
 
+from ..emlp_torch.ppo_emlp import EMLP_MONO_Actor_PPO, EMLP_MONO_Critic_PPO
+
 @dataclass
 class PPOConfig:
     name: str = "ppo"
@@ -52,7 +54,7 @@ class PPOConfig:
     eta_min: float = 1e-5
     scheduler_T_0: int = 50_000_000
 
-    train_every: int = 1024  #(default: 32)
+    train_every: int = 650 #1024  #(default: 32)
     ppo_epochs: int = 20  #(default: 4)
     num_minibatches: int = 128  #(default: 16)
     clip_param: float = 0.2  #(default: 0.1)
@@ -66,11 +68,14 @@ class PPOConfig:
     
     # network size
     actor_hidden_dim: int = 16  #(default: [256, 256, 256])
-    critic_hidden_dim: int = 256  #(default: [256, 256, 256])
+    critic_hidden_dim: int = 64  #(default: [256, 256, 256])
 
-    lam_T: float = 0.4 #(default: 0.4)
-    lam_S: float = 0.3 #(default: 0.3)
-    lam_M: float = 0.6 #(default: 0.6)
+    lam_T: float = 0.2 #(default: 0.4)
+    lam_S: float = 0.1 #(default: 0.3)
+    lam_M: float = 0.3 #(default: 0.6)
+
+    # whether to use equivariant reinforcement learning
+    use_equiv: bool = True
 
     # whether to use privileged information
     priv_actor: bool = False
@@ -146,65 +151,90 @@ class PPOPolicy(TensorDictModuleBase):
 
         fake_input = observation_spec.zero()
 
-        if self.cfg.priv_actor:
-            intrinsics_dim = observation_spec[("agents", "intrinsics")].shape[-1]
-            actor_module = TensorDictSequential(
-                TensorDictModule(make_mlp([128, 128]), [("agents", "observation")], ["feature"]),
-                TensorDictModule(
-                    nn.Sequential(nn.LayerNorm(intrinsics_dim), make_mlp([64, 64])),
-                    [("agents", "intrinsics")], ["context"]
-                ),
-                CatTensors(["feature", "context"], "feature"),
-                TensorDictModule(
-                    nn.Sequential(make_mlp([256, 256]), Actor(self.action_dim)),
-                    ["feature"], ["loc", "scale"]
-                )
-            )
-        else:
-            """
-            actor_module=TensorDictModule(
-                nn.Sequential(make_mlp([256, 256, 256]), Actor(self.action_dim)),
-                [("agents", "observation")], ["loc", "scale"]
-            )
-            """
-            actor_module=TensorDictModule(
-                nn.Sequential(make_mlp([self.cfg.actor_hidden_dim, self.cfg.actor_hidden_dim]), Actor(self.action_dim)),
-                [("agents", "observation")], ["loc", "scale"]
+        if self.cfg.use_equiv:
+            # Wrap equivariant actor
+            self.emlp_actor_core = EMLP_MONO_Actor_PPO(self.action_dim, self.cfg.actor_hidden_dim, self.device)
+            actor_module = TensorDictModule(
+                module=self.emlp_actor_core,
+                in_keys=[("agents", "observation")],
+                out_keys=["loc", "scale"]
             )
 
-        self.actor: ProbabilisticActor = ProbabilisticActor(
-            module=actor_module,
-            in_keys=["loc", "scale"],
-            out_keys=[("agents", "action")],
-            distribution_class=TanhNormal, #TanhIndependentNormal #IndependentNormal #TanhNormal
-            return_log_prob=True
-        ).to(self.device)
-
-        if self.cfg.priv_critic:
-            intrinsics_dim = observation_spec[("agents", "intrinsics")].shape[-1]
-            self.critic = TensorDictSequential(
-                TensorDictModule(make_mlp([128, 128]), [("agents", "observation")], ["feature"]),
-                TensorDictModule(
-                    nn.Sequential(nn.LayerNorm(intrinsics_dim), make_mlp([64, 64])),
-                    [("agents", "intrinsics")], ["context"]
-                ),
-                CatTensors(["feature", "context"], "feature"),
-                TensorDictModule(
-                    nn.Sequential(make_mlp([256, 256]), nn.LazyLinear(1)),
-                    ["feature"], ["state_value"]
-                )
+            self.actor = ProbabilisticActor(
+                module=actor_module,
+                in_keys=["loc", "scale"],
+                out_keys=[("agents", "action")],
+                distribution_class=TanhNormal,
+                return_log_prob=True
             ).to(self.device)
         else:
-            """
-            self.critic = TensorDictModule(
-                nn.Sequential(make_mlp([256, 256, 256]), nn.LazyLinear(1)),
-                [("agents", "observation")], ["state_value"]
-            ).to(self.device)"
-            """
-            self.critic = TensorDictModule(
-                nn.Sequential(make_mlp([self.cfg.critic_hidden_dim, self.cfg.critic_hidden_dim]), nn.LazyLinear(1)),
-                [("agents", "observation")], ["state_value"]
+            if self.cfg.priv_actor:
+                intrinsics_dim = observation_spec[("agents", "intrinsics")].shape[-1]
+                actor_module = TensorDictSequential(
+                    TensorDictModule(make_mlp([128, 128]), [("agents", "observation")], ["feature"]),
+                    TensorDictModule(
+                        nn.Sequential(nn.LayerNorm(intrinsics_dim), make_mlp([64, 64])),
+                        [("agents", "intrinsics")], ["context"]
+                    ),
+                    CatTensors(["feature", "context"], "feature"),
+                    TensorDictModule(
+                        nn.Sequential(make_mlp([256, 256]), Actor(self.action_dim)),
+                        ["feature"], ["loc", "scale"]
+                    )
+                )
+            else:
+                """
+                actor_module=TensorDictModule(
+                    nn.Sequential(make_mlp([256, 256, 256]), Actor(self.action_dim)),
+                    [("agents", "observation")], ["loc", "scale"]
+                )
+                """
+                actor_module=TensorDictModule(
+                    nn.Sequential(make_mlp([self.cfg.actor_hidden_dim, self.cfg.actor_hidden_dim]), Actor(self.action_dim)),
+                    [("agents", "observation")], ["loc", "scale"]
+                )
+
+            self.actor: ProbabilisticActor = ProbabilisticActor(
+                module=actor_module,
+                in_keys=["loc", "scale"],
+                out_keys=[("agents", "action")],
+                distribution_class=TanhNormal, #TanhIndependentNormal #IndependentNormal #TanhNormal
+                return_log_prob=True
             ).to(self.device)
+
+        if self.cfg.use_equiv:
+            self.emlp_critic_core = EMLP_MONO_Critic_PPO(self.cfg.critic_hidden_dim, device)
+            self.critic = TensorDictModule(
+                module=self.emlp_critic_core,
+                in_keys=[("agents", "observation")],
+                out_keys=["state_value"]
+            ).to(self.device)
+        else:
+            if self.cfg.priv_critic:
+                intrinsics_dim = observation_spec[("agents", "intrinsics")].shape[-1]
+                self.critic = TensorDictSequential(
+                    TensorDictModule(make_mlp([128, 128]), [("agents", "observation")], ["feature"]),
+                    TensorDictModule(
+                        nn.Sequential(nn.LayerNorm(intrinsics_dim), make_mlp([64, 64])),
+                        [("agents", "intrinsics")], ["context"]
+                    ),
+                    CatTensors(["feature", "context"], "feature"),
+                    TensorDictModule(
+                        nn.Sequential(make_mlp([256, 256]), nn.LazyLinear(1)),
+                        ["feature"], ["state_value"]
+                    )
+                ).to(self.device)
+            else:
+                """
+                self.critic = TensorDictModule(
+                    nn.Sequential(make_mlp([256, 256, 256]), nn.LazyLinear(1)),
+                    [("agents", "observation")], ["state_value"]
+                ).to(self.device)"
+                """
+                self.critic = TensorDictModule(
+                    nn.Sequential(make_mlp([self.cfg.critic_hidden_dim, self.cfg.critic_hidden_dim]), nn.LazyLinear(1)),
+                    [("agents", "observation")], ["state_value"]
+                ).to(self.device)
 
         self.actor(fake_input)
         self.critic(fake_input)
@@ -402,6 +432,10 @@ class PPOPolicy(TensorDictModuleBase):
         value_loss_clipped = self.critic_loss_fn(b_returns, values_clipped)
         value_loss_original = self.critic_loss_fn(b_returns, values)
         value_loss = torch.max(value_loss_original, value_loss_clipped)
+
+        if self.cfg.use_equiv:
+            policy_loss += 1e-5 * self.emlp_actor_core.spectral_norm_regularization()
+            value_loss += 1e-5 * self.emlp_critic_core.spectral_norm_regularization()
 
         loss = policy_loss + entropy_loss + value_loss
         self.actor_opt.zero_grad()
