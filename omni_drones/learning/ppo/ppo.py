@@ -54,7 +54,7 @@ class PPOConfig:
     eta_min: float = 1e-5
     scheduler_T_0: int = 50_000_000
 
-    train_every: int = 650 #1024  #(default: 32)
+    train_every: int = 1024 #650 #1024  #(default: 32)
     ppo_epochs: int = 20  #(default: 4)
     num_minibatches: int = 128  #(default: 16)
     clip_param: float = 0.2  #(default: 0.1)
@@ -67,15 +67,15 @@ class PPOConfig:
     grad_max_norm: float = 10  #(default: 5)
     
     # network size
-    actor_hidden_dim: int = 16  #(default: [256, 256, 256])
-    critic_hidden_dim: int = 64  #(default: [256, 256, 256])
+    actor_hidden_dim: int = 32 #16  #(default: [256, 256, 256])
+    critic_hidden_dim: int = 256 #64 #(default: [256, 256, 256])
 
     lam_T: float = 0.2 #(default: 0.4)
     lam_S: float = 0.1 #(default: 0.3)
     lam_M: float = 0.3 #(default: 0.6)
 
     # whether to use equivariant reinforcement learning
-    use_equiv: bool = True
+    use_equiv: bool = False
 
     # whether to use privileged information
     priv_actor: bool = False
@@ -471,7 +471,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         # Spatial Smoothness:
         noise_S = (
-            torch.normal(mean=0., std=0.05, size=(1, 23))).to(self.device) # mean and standard deviation
+            torch.normal(mean=0., std=0.05, size=(1, batch_obs.shape[2]))).to(self.device) # mean and standard deviation
         batch_act_perturbed = actor(batch_obs + noise_S)[0].clamp(-self.max_action, self.max_action)  # Perturbed actions
         Loss_S = F.mse_loss(batch_act, batch_act_perturbed)
 

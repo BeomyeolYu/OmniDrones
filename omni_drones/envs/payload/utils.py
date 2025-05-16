@@ -31,15 +31,20 @@ from ..utils import create_bar
 
 def attach_payload(
     drone_prim_path: str,
-    bar_length: str,
-    payload_radius: float=0.04,
-    payload_mass: float=0.3
+    bar_length: float,
+    payload_radius: float = 0.04,
+    payload_mass: float = 0.3,
+    drone_scale: float = 1.35  # <- add this
 ):
+    # Compensate the bar's size and offsets
+    scaled_bar_length = bar_length / drone_scale
+    scaled_translation = -scaled_bar_length / 2.0
+
     bar = prim_utils.create_prim(
         prim_path=drone_prim_path + "/bar",
         prim_type="Capsule",
-        translation=(0., 0., -bar_length / 2.),
-        attributes={"radius": 0.01, "height": bar_length}
+        translation=(0., 0., scaled_translation),
+        attributes={"radius": 0.01, "height": scaled_bar_length}
     )
     bar.GetAttribute('primvars:displayColor').Set([(0.8, 0.1, 0.1)])
     UsdPhysics.RigidBodyAPI.Apply(bar)
@@ -58,21 +63,67 @@ def attach_payload(
     UsdPhysics.DriveAPI.Apply(joint, "rotY")
     joint.GetAttribute("drive:rotX:physics:damping").Set(2e-6)
     joint.GetAttribute("drive:rotY:physics:damping").Set(2e-6)
-    # joint.GetAttribute('physics:excludeFromArticulation').Set(True)
+
+    # Also scale the payload offset
+    scaled_payload_offset = -scaled_bar_length
 
     payload = objects.DynamicSphere(
         prim_path=drone_prim_path + "/payload",
-        translation=(0., 0., -bar_length),
-        radius=payload_radius,
+        translation=(0., 0., scaled_payload_offset),
+        radius=payload_radius / drone_scale,  # optional: also shrink radius
         mass=payload_mass
     )
     joint = script_utils.createJoint(stage, "Fixed", bar, payload.prim)
-    kit_utils.set_collision_properties(
-        drone_prim_path + "/bar", contact_offset=0.02, rest_offset=0
-    )
-    kit_utils.set_collision_properties(
-        drone_prim_path + "/payload", contact_offset=0.02, rest_offset=0
-    )
+
+    kit_utils.set_collision_properties(drone_prim_path + "/bar", contact_offset=0.02, rest_offset=0)
+    kit_utils.set_collision_properties(drone_prim_path + "/payload", contact_offset=0.02, rest_offset=0)
+
+
+# def attach_payload(
+#     drone_prim_path: str,
+#     bar_length: str,
+#     payload_radius: float=0.04,
+#     payload_mass: float=0.3
+# ):
+
+#     bar = prim_utils.create_prim(
+#         prim_path=drone_prim_path + "/bar",
+#         prim_type="Capsule",
+#         translation=(0., 0., -bar_length / 2.),
+#         attributes={"radius": 0.01, "height": bar_length}
+#     )
+#     bar.GetAttribute('primvars:displayColor').Set([(0.8, 0.1, 0.1)])
+#     UsdPhysics.RigidBodyAPI.Apply(bar)
+#     UsdPhysics.CollisionAPI.Apply(bar)
+#     massAPI = UsdPhysics.MassAPI.Apply(bar)
+#     massAPI.CreateMassAttr().Set(0.001)
+
+#     base_link = prim_utils.get_prim_at_path(drone_prim_path + "/base_link")
+#     stage = prim_utils.get_current_stage()
+#     joint = script_utils.createJoint(stage, "D6", bar, base_link)
+#     joint.GetAttribute("limit:rotX:physics:low").Set(-120)  # joint angles
+#     joint.GetAttribute("limit:rotX:physics:high").Set(120)
+#     joint.GetAttribute("limit:rotY:physics:low").Set(-120)
+#     joint.GetAttribute("limit:rotY:physics:high").Set(120)
+#     UsdPhysics.DriveAPI.Apply(joint, "rotX")
+#     UsdPhysics.DriveAPI.Apply(joint, "rotY")
+#     joint.GetAttribute("drive:rotX:physics:damping").Set(2e-6)
+#     joint.GetAttribute("drive:rotY:physics:damping").Set(2e-6)
+#     # joint.GetAttribute('physics:excludeFromArticulation').Set(True)
+
+#     payload = objects.DynamicSphere(
+#         prim_path=drone_prim_path + "/payload",
+#         translation=(0., 0., -bar_length),
+#         radius=payload_radius,
+#         mass=payload_mass
+#     )
+#     joint = script_utils.createJoint(stage, "Fixed", bar, payload.prim)
+#     kit_utils.set_collision_properties(
+#         drone_prim_path + "/bar", contact_offset=0.02, rest_offset=0
+#     )
+#     kit_utils.set_collision_properties(
+#         drone_prim_path + "/payload", contact_offset=0.02, rest_offset=0
+#     )
 
 
 # def attach_payload(

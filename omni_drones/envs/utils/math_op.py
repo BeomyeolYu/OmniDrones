@@ -1,4 +1,5 @@
 import torch
+import math
 
 def hat(x):
     ensure_vector(x, 3)
@@ -166,6 +167,23 @@ def ensure_SO3(R: torch.Tensor) -> torch.Tensor:
 
     return R_proj
 
+def ensure_S2(x, tolerance=1e-6):
+    """
+    Ensures the input vectors lie on the unit sphere (S²).
+    Args:
+        x: Tensor of shape (..., 3)
+        tolerance: float, relative tolerance for checking unit norm
+    Returns:
+        Normalized tensor of same shape as x
+    """
+    norm = torch.norm(x, dim=-1, keepdim=True)  # (..., 1)
+    is_unit = torch.isclose(norm, torch.ones_like(norm), rtol=tolerance)
+
+    # If not unit, normalize
+    x_normalized = x / norm.clamp(min=1e-8)
+
+    # Keep original vector if it's already unit-length
+    return torch.where(is_unit, x, x_normalized)
 
 # def ensure_SO3(R, tolerance=1e-6):
 #     """ Make sure the given input array is in SO(3).
@@ -265,6 +283,56 @@ def state_normalization(state, x_lim, v_lim, W_lim):
     '''
 
     return x_norm, v_norm, R_vec, W_norm
+
+# Normalization state vectors: [max, min] -> [-1, 1]
+def state_normalization_payload(state, y_lim, y_dot_lim, w_lim, W_lim):
+    y, y_dot, q, w, R_vec, W = state[0], state[1], state[2], state[3], state[4], state[5]
+    y_norm, y_dot_norm, w_norm, W_norm = y/y_lim, y_dot/y_dot_lim, w/w_lim, W/W_lim
+    '''
+    R = ensure_SO3(R_vec.reshape(3, 3, order='F')) # re-orthonormalization if needed
+    
+    R_vec = R.reshape(9, 1, order='F').flatten()
+    return x_norm, v_norm, R_vec, W_norm
+    '''
+
+    return y_norm, y_dot_norm, q, w_norm, R_vec, W_norm
+
+def norm_ang_btw_two_vectors(current_vec, desired_vec):
+    """
+    Computes the signed angle (normalized by π) between two 3D vectors.
+    Supports batched inputs. Returns tensor of shape (B, 1).
+    
+    Args:
+        current_vec: (B, 1, 3)
+        desired_vec: (1, 3) or (B, 1, 3)
+    """
+    # Ensure desired_vec is [1, 1, 3] before expand
+    if desired_vec.ndim == 2:
+        desired_vec = desired_vec.unsqueeze(0)  # [1, 1, 3]
+    elif desired_vec.ndim == 1:
+        desired_vec = desired_vec.view(1, 1, 3)
+    elif desired_vec.ndim != 3:
+        raise ValueError(f"Unsupported desired_vec shape: {desired_vec.shape}")
+
+    # Expand to match current_vec
+    desired_vec = desired_vec.expand_as(current_vec)
+
+    # Normalize both vectors
+    desired_unit = desired_vec / torch.norm(desired_vec, dim=-1, keepdim=True).clamp(min=1e-6)
+    current_unit = current_vec / torch.norm(current_vec, dim=-1, keepdim=True).clamp(min=1e-6)
+
+    # Dot and angle
+    dot = (desired_unit * current_unit).sum(dim=-1).clamp(-1.0, 1.0)
+    angle = torch.acos(dot)
+
+    # Direction sign using z-component of cross
+    cross = torch.cross(desired_unit, current_unit, dim=-1)
+    z_sign = torch.sign(cross[..., 2])
+    signed_angle = torch.where(z_sign < 0, -angle, angle)
+
+    # Normalize to [-1, 1]
+    norm_angle = signed_angle / math.pi
+    return norm_angle.unsqueeze(-1)
 
 class IntegralErrorVec3:
     def __init__(self, num_envs, device):
