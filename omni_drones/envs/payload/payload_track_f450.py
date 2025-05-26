@@ -20,14 +20,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import omni.isaac.core.utils.prims as prim_utils
-import omni.isaac.core.objects as objects
-import omni_drones.utils.kit as kit_utils
-
 import copy
-import random
+import omni_drones.utils.kit as kit_utils
+from omni_drones.utils.torch import euler_to_quaternion, quat_rotate
+import omni.isaac.core.utils.prims as prim_utils
 import torch
 import torch.distributions as D
+from torch.func import vmap
 
 from omni_drones.envs.isaac_env import AgentSpec, IsaacEnv
 from omni_drones.robots.drone import MultirotorBase
@@ -37,34 +36,35 @@ from omni_drones.utils.torch import euler_to_quaternion, quat_axis, quaternion_t
 from tensordict.tensordict import TensorDict, TensorDictBase
 from torchrl.data import UnboundedContinuousTensorSpec, CompositeSpec, DiscreteTensorSpec
 from omni.isaac.debug_draw import _debug_draw
+from carb import Float3, ColorRgba
 
+from ..utils import lemniscate, scale_time
 from .utils import attach_payload
-from..inv_pendulum.utils import create_pendulum
 
 from omni_drones.envs.utils.math_op import ensure_SO3, ensure_S2, state_normalization_payload, \
     norm_ang_btw_two_vectors, IntegralErrorVec3, IntegralError#, quaternion_to_rotation_matrix
 
-class PayloadHover_F450(IsaacEnv):
+
+class PayloadTrack_F450(IsaacEnv):
     r"""
-    An intermediate control task where a spherical payload is attached to the drone.
-    The goal for the agent is to hover the payload at a target position.
+    An intermediate control task where a spherical payload is attached to the UAV via a rigid link.
+    The goal for the agent is to maneuver in a way that the payload's motion tracks a given
+    reference trajectory.
 
     ## Observation
 
     - `drone_payload_rpos` (3): The position of the drone relative to the payload's position.
-    - `ref_payload_rpos` (3): The reference positions of the
-      payload at multiple future time steps. This helps the agent anticipate the desired payload
-      trajectory.
     - `drone_state` (16 + `num_rotors`): The basic information of the drone (except its position),
       containing its rotation (in quaternion), velocities (linear and angular),
       heading and up vectors, and the current throttle.
-    - `payload_vels` (6): The linear and angular velocities of the payload.
+    - `target_payload_rpos` (3 * `future_traj_steps`): The position of the reference relative to the payload's position.
+    - `payload_vel` (6): The payload's linear and angular velocities.
     - `time_encoding` (optional): The time encoding, which is a 4-dimensional
       vector encoding the current progress of the episode.
 
     ## Reward
 
-    - `pos`: Reward for maintaining the position of the payload around the target position.
+    - `pos`: Reward for tracking the trajectory based on how close the drone's payload is to the target position.
     - `up`: Reward for maintaining an upright orientation.
     - `effort`: Reward computed from the effort of the drone to optimize the
       energy consumption.
@@ -80,25 +80,40 @@ class PayloadHover_F450(IsaacEnv):
     ## Episode End
 
     The episode ends when the drone gets too close to the ground, or when
-    the payload gets too close to the ground, or when the maximum episode length
-    is reached.
+    the distance between the payload and the target exceeds a threshold,
+    or when the maximum episode length is reached.
 
     ## Config
 
     | Parameter               | Type  | Default       | Description                                                                                                                                                                                                                             |
     | ----------------------- | ----- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
     | `drone_model`           | str   | "hummingbird" | Specifies the model of the drone being used in the environment.                                                                                                                                                                         |
+    | `reset_thres`           | float | 0.8           | Threshold for the distance between the payload and its target, upon exceeding which the episode will be reset.                                                                                                                          |
+    | `future_traj_steps`     | int   | 6             | Number of future trajectory steps the drone needs to predict.                                                                                                                                                                           |
     | `bar_length`            | float | 1.0           | Length of the pendulum's bar.                                                                                                                                                                                                           |
-    | `reward_distance_scale` | float | 1.6           | Scales the reward based on `target_payload_rpos`.                                                                                                                                                                                       |
+    | `reward_distance_scale` | float | 1.6           | Scales the reward based on the distance between the payload and its target.                                                                                                                                                             |
     | `time_encoding`         | bool  | True          | Indicates whether to include time encoding in the observation space. If set to True, a 4-dimensional vector encoding the current progress of the episode is included in the observation. If set to False, this feature is not included. |
     """
     def __init__(self, cfg, headless):
-        self.time_encoding = cfg.task.time_encoding
+        self.Cy = cfg.task.Cy
+        self.CIy = cfg.task.CIy
+        self.Cy_dot = cfg.task.Cy_dot
+        self.Cq = cfg.task.Cq
+        self.Cw = cfg.task.Cw
+        self.Cb1 = cfg.task.Cb1
+        self.CIb1 = cfg.task.CIb1
+        self.CW = cfg.task.CW
+        self.rwd_alpha = cfg.task.rwd_alpha
+        self.rwd_beta = cfg.task.rwd_beta
+        self.reset_thres = cfg.task.reset_thres
+        self.future_traj_steps = int(cfg.task.future_traj_steps)
+        assert self.future_traj_steps > 0
         self.bar_length = cfg.task.bar_length
         self.payload_radius = cfg.task.payload_radius
         self.payload_mass = cfg.task.payload_mass
         self.drone_scale = cfg.task.drone_scale
         self.scaled_bar_length = self.bar_length / self.drone_scale
+        self.time_encoding = cfg.task.time_encoding
         super().__init__(cfg, headless)
 
         self.drone.initialize()
@@ -107,10 +122,12 @@ class PayloadHover_F450(IsaacEnv):
             if "drone" in self.cfg.task.randomization:
                 self.drone.setup_randomization(self.cfg.task.randomization["drone"])
 
-        # create and initialize additional views
+        self.init_joint_pos = self.drone.get_joint_positions(True)
+        self.init_joint_vels = torch.zeros_like(self.drone.get_joint_velocities())
+
         self.payload = RigidPrimView(
             f"/World/envs/env_*/{self.drone.name}_*/payload",
-            # reset_xform_properties=False,
+            reset_xform_properties=False,
         )
         self.payload.initialize()
         self.bar = RigidPrimView(
@@ -118,15 +135,7 @@ class PayloadHover_F450(IsaacEnv):
         )
         self.bar.initialize()
 
-        self.init_joint_pos = self.drone.get_joint_positions(True)
-        self.init_joint_vels = torch.zeros_like(self.drone.get_joint_velocities())
-        '''
-        print('self.init_joint_pos:', self.init_joint_pos, 'self.init_joint_vels:', self.init_joint_vels)
-        self.init_joint_pos:  tensor([[[0., 0., 0., 0., 0., 0.]],[[0., 0., 0., 0., 0., 0.]]], device='cuda:0') 
-        self.init_joint_vels: tensor([[[0., 0., 0., 0., 0., 0.]],[[0., 0., 0., 0., 0., 0.]]], device='cuda:0')
-        '''
-
-        self.yd = self.payload_target_pos  # desired tracking position command, [m]
+        self.target_pos = self.yd = torch.zeros(self.num_envs, self.future_traj_steps, 3, device=self.device)  # desired tracking position command, [m]
         self.yd_dot = torch.tensor([[0., 0., 0.]], device=self.device)  # [m/s]
         self.qd = torch.tensor([[0., 0., -1.]], device=self.device)  # desired link direction, S^2
         self.wd = torch.tensor([[0., 0., 0.]], device=self.device)  # desired link angular velocity, [rad/s]
@@ -152,41 +161,36 @@ class PayloadHover_F450(IsaacEnv):
         # initial condition of link direction, S^2
         self.init_q = torch.tensor([[0., 0., -1.]], device=self.device)  
 
-        self.init_pos = self.payload_target_pos - self.bar_length*self.init_q  # goal location of drones
-        '''
-        print("self.init_pos:", self.init_pos, "self.payload_target_pos:", self.payload_target_pos)
-        self.init_pos: tensor([[0., 0., 2.]], device='cuda:0') self.payload_target_pos: tensor([[0., 0., 1.]], device='cuda:0')
-        '''
-
-        # initial conditions of "DRONES"; 50% of initial pos error
-        self.init_pos_dist = D.Uniform(
-            torch.tensor([-self.init_pos[0,0]*0.5, -self.init_pos[0,1]*0.5, self.init_pos[0,2]-(self.x_lim*0.5)], device=self.device),
-            torch.tensor([ self.init_pos[0,0]*0.5,  self.init_pos[0,1]*0.5, self.init_pos[0,2]+(self.x_lim*0.5)], device=self.device)
-        )
         self.init_rpy_dist = D.Uniform(
             torch.tensor([-self.rp_lim, -self.rp_lim, 0.], device=self.device) * torch.pi,
             torch.tensor([ self.rp_lim,  self.rp_lim, 2.], device=self.device) * torch.pi
-        )
-        self.init_pos_dist_goal = D.Uniform(
-            torch.tensor([self.init_pos[0,0]-0., self.init_pos[0,1]-0., self.init_pos[0,2]-0.], device=self.device),
-            torch.tensor([self.init_pos[0,0]+0., self.init_pos[0,1]+0., self.init_pos[0,2]+0.], device=self.device)
-        )
-        self.init_rpy_dist_goal = D.Uniform(
-            torch.tensor([-0., -0., 0.], device=self.device) * torch.pi,
-            torch.tensor([0., 0., 2.], device=self.device) * torch.pi
         )
         self.target_rpy_dist = D.Uniform(
             torch.tensor([0., 0., 0.], device=self.device) * torch.pi,
             torch.tensor([0., 0., 2.], device=self.device) * torch.pi
         )
-        # randomly push the payload by applying a force
-        push_force_scale = self.cfg.task.push_force_scale
-        self.push_force_dist = D.Normal(
-            torch.tensor([0., 0., 0.], device=self.device),
-            torch.tensor(push_force_scale, device=self.device)/self.dt
+
+        self.traj_rpy_dist = D.Uniform(
+            torch.tensor([0., 0., 0.], device=self.device) * torch.pi,
+            torch.tensor([0., 0., 2.], device=self.device) * torch.pi
         )
-        push_interval = self.cfg.task.push_interval
-        self.push_prob = (1 - torch.exp(-self.dt/torch.tensor(push_interval))).to(self.device)
+        self.traj_c_scale = cfg.task.traj_c_scale
+        self.traj_c_dist = D.Uniform(
+            torch.tensor(self.traj_c_scale[0], device=self.device),
+            torch.tensor(self.traj_c_scale[1], device=self.device)
+        )
+        self.traj_scale_x_scale = cfg.task.traj_scale_x_scale
+        self.traj_scale_y_scale = cfg.task.traj_scale_y_scale
+        self.traj_scale_z_scale = cfg.task.traj_scale_z_scale
+        self.traj_scale_dist = D.Uniform(
+            torch.tensor([self.traj_scale_x_scale[0], self.traj_scale_y_scale[0], self.traj_scale_z_scale[0]], device=self.device),
+            torch.tensor([self.traj_scale_x_scale[1], self.traj_scale_y_scale[1], self.traj_scale_z_scale[1]], device=self.device)
+        )
+        self.traj_w_scale = cfg.task.traj_w_scale
+        self.traj_w_dist = D.Uniform(
+            torch.tensor(self.traj_w_scale[0], device=self.device),
+            torch.tensor(self.traj_w_scale[1], device=self.device)
+        )
 
         payload_mass_scale = self.cfg.task.payload_mass_scale
         self.payload_masses = self.payload.get_masses()
@@ -194,39 +198,39 @@ class PayloadHover_F450(IsaacEnv):
             torch.as_tensor(payload_mass_scale[0] * self.payload_masses[0], device=self.device),
             torch.as_tensor(payload_mass_scale[1] * self.payload_masses[0], device=self.device)
         )
-        '''
-        self.payload_mass_dist = D.Uniform(
-            torch.as_tensor(payload_mass_scale[0] * self.drone.MASS_0[0], device=self.device),
-            torch.as_tensor(payload_mass_scale[1] * self.drone.MASS_0[0], device=self.device)
+        self.bar_mass_dist = D.Uniform(
+            torch.as_tensor(self.cfg.task.bar_mass_min, device=self.device),
+            torch.as_tensor(self.cfg.task.bar_mass_max, device=self.device)
         )
-        print("drone.MASS_0[0]:",self.drone.MASS_0[0], "payload_mass_dist:",self.payload_mass_dist, "payload_masses:",self.payload_masses)
-        drone.MASS_0[0]: tensor([1.7540], device='cuda:0') 
-        payload_mass_dist: Uniform(low: tensor([0.3508], device='cuda:0'), high: tensor([0.5262], device='cuda:0')) 
-        payload_masses: tensor([[0.3000],[0.3000]], device='cuda:0')
+
+        self.origin = torch.tensor([0., 0., 2.], device=self.device)
+        self.traj_t0 = torch.pi / 2
+        self.traj_c = torch.zeros(self.num_envs, device=self.device) 
+        self.traj_scale = torch.zeros(self.num_envs, 3, device=self.device)
+        self.traj_rot = torch.zeros(self.num_envs, 4, device=self.device)
+        self.traj_w = torch.ones(self.num_envs, device=self.device)
         '''
+        | Parameter    | Description                                     |
+        | ------------ | ----------------------------------------------- |
+        | `traj_c`     | Shape factor for lemniscate loop width          |
+        | `traj_w`     | Frequency multiplier (how fast the loop is run) |
+        | `traj_scale` | How big the loop is in each dimension           |
+        | `traj_rot`   | Quaternion rotation of the whole loop           |
+        | `origin`     | Offset position (e.g., height above ground)     |
+        '''
+
         self.rot_speed_vis = torch.full(
             (*self.drone.shape, self.drone.rotor_joint_indices.shape[-1]),
             40.0,  # or any desired value
             device=self.device
         )  # rotor spin vis [rad/s] 
 
-        # reward coeff.
-        self.reward_crash = -1. # Out of boundary or crashed!
-        self.Cy = 6.0
-        self.CIy = 0.1
-        self.Cy_dot = 0.4
-        self.Cq = 0.2
-        self.Cw = 0.2
-        self.Cb1 = 6.0
-        self.CIb1 = 0.1
-        self.CW = 0.6
-        self.rwd_alpha = 0.01
-        self.rwd_beta = 0.05
         # Compute reward_min for normalization
+        self.reward_crash = -1. # Out of boundary or crashed!
         self.reward_min = -torch.ceil(torch.tensor(
             self.Cy + self.CIy + self.Cy_dot + self.Cq + self.Cw + self.Cb1 + self.CIb1 + self.CW,
             device=self.device))
-
+        
         self.alpha = 0.8
 
         self.draw = _debug_draw.acquire_debug_draw_interface()
@@ -243,43 +247,26 @@ class PayloadHover_F450(IsaacEnv):
             dynamic_friction=1.0,
             restitution=0.0,
         )
-
-        self.drone.spawn(translations=[(0.0, 0.0, 2.)])
+        self.drone.spawn(translations=[(0.0, 0.0, 1.5)])
         attach_payload(f"/World/envs/env_0/{self.drone.name}_0", self.bar_length, self.payload_radius, \
                        self.payload_mass, self.drone_scale)
-
-        self.payload_target_pos = torch.tensor([[0., 0., 1.]], device=self.device)  # desired tracking position command, [m]
-        target_vis_sphere = objects.DynamicSphere(
-            "/World/envs/env_0/target",
-            translation=(self.payload_target_pos[0,0], self.payload_target_pos[0,1], self.payload_target_pos[0,2]),
-            radius=0.05,
-            color=torch.tensor([1., 0., 0.])
-        )
-        kit_utils.set_collision_properties(target_vis_sphere.prim_path, collision_enabled=False)
-        kit_utils.set_rigid_body_properties(target_vis_sphere.prim_path, disable_gravity=True)
 
         return ["/World/defaultGroundPlane"]
 
     def _set_specs(self):
         '''
         drone_state_dim = self.drone.state_spec.shape[-1]
-        obs_dim = drone_state_dim + 9
+        obs_dim = drone_state_dim + 3 * (self.future_traj_steps-1) + 9
         if self.time_encoding:
             self.time_encoding_dim = 4
             obs_dim += self.time_encoding_dim
         '''
-        # [ey_norm, eIy_norm, ey_dot_norm, eq_norm, ew_norm, R_vec, eb1_norm, eIb1_norm, eW_norm]
-        # obs_dim = 3+3+3 + 1 + 3+9+1+1+3
-
-        # [ey_norm, eIy_norm, ey_dot_norm, eq, ew_norm, R_vec, eb1_norm, eIb1_norm, eW_norm]
-        # obs_dim = 3+3+3 + 2 + 3+9+1+1+3
-
         # [ey_norm, eIy_norm, ey_dot_norm, eq, q, ew_norm, R_vec, eb1_norm, eIb1_norm, eW_norm]
         obs_dim = 3+3+3 + 2+3+ 3+9+1+1+3
 
         self.observation_spec = CompositeSpec({
             "agents": {
-                "observation": UnboundedContinuousTensorSpec((1, obs_dim), device=self.device),
+                "observation": UnboundedContinuousTensorSpec((1, obs_dim)),
                 "intrinsics": self.drone.intrinsics_spec.unsqueeze(0).to(self.device)
             }
         }).expand(self.num_envs).to(self.device)
@@ -300,30 +287,31 @@ class PayloadHover_F450(IsaacEnv):
             reward_key=("agents", "reward"),
             state_key=("agents", "intrinsics")
         )
+
         stats_spec = CompositeSpec({
             "return": UnboundedContinuousTensorSpec(1),
             "episode_len": UnboundedContinuousTensorSpec(1),
+            # "tracking_error": UnboundedContinuousTensorSpec(1),
             "pos_error": UnboundedContinuousTensorSpec(1),
             "heading_alignment": UnboundedContinuousTensorSpec(1)
             # "action_smoothness": UnboundedContinuousTensorSpec(1),
-            # "motion_smoothness": UnboundedContinuousTensorSpec(1)
         }).expand(self.num_envs).to(self.device)
         self.observation_spec["stats"] = stats_spec
         self.stats = stats_spec.zero()
 
+
     def _reset_idx(self, env_ids: torch.Tensor):
         self.drone._reset_idx(env_ids)
+        self.traj_c[env_ids] = self.traj_c_dist.sample(env_ids.shape)
+        self.traj_rot[env_ids] = euler_to_quaternion(self.traj_rpy_dist.sample(env_ids.shape))
+        self.traj_scale[env_ids] = self.traj_scale_dist.sample(env_ids.shape)
+        traj_w = self.traj_w_dist.sample(env_ids.shape)
+        self.traj_w[env_ids] = torch.randn_like(traj_w).sign() * traj_w
 
-        # Spawning at the origin position and at zero angle (w/ random linear and angular velocity).
-        rand_chance = random.random()  # generate a random float between 0.0 and 1.0
-        if rand_chance < 0.2: # 20% of the training
-            pos = self.init_pos_dist_goal.sample(env_ids.shape)#.sample((*env_ids.shape, 1))
-            rpy = self.init_rpy_dist_goal.sample(env_ids.shape)#.sample((*env_ids.shape, 1))
-        else:
-            pos = self.init_pos_dist.sample(env_ids.shape)#.sample((*env_ids.shape, 1))
-            rpy = self.init_rpy_dist.sample(env_ids.shape)#.sample((*env_ids.shape, 1))
-
-        rot = euler_to_quaternion(rpy)
+        t0 = torch.zeros(len(env_ids), device=self.device)
+        pos = lemniscate(t0 + self.traj_t0, self.traj_c[env_ids]) + self.origin
+        pos[..., 2] += self.bar_length
+        rot = euler_to_quaternion(self.init_rpy_dist.sample(env_ids.shape))
         vel = torch.zeros(len(env_ids), 1, 6, device=self.device)  #TODO: sample v and W from dist
 
         self.drone.set_world_poses(
@@ -336,10 +324,26 @@ class PayloadHover_F450(IsaacEnv):
         payload_mass = self.payload_mass_dist.sample(env_ids.shape)
         self.payload.set_masses(payload_mass, env_ids)
         self.payload_masses[env_ids] = payload_mass
+        bar_mass = self.bar_mass_dist.sample(env_ids.shape)
+        self.bar.set_masses(bar_mass, env_ids)
 
         target_rpy = self.target_rpy_dist.sample(env_ids.shape) #.sample((*env_ids.shape, 1))
         target_rot = euler_to_quaternion(target_rpy)
         self.target_heading[env_ids] = quat_axis(target_rot.squeeze(1), 0).unsqueeze(1)
+
+        self.stats[env_ids] = 0.
+
+        if self._should_render(0) and (env_ids == self.central_env_idx).any():
+            # visualize the trajectory
+            self.draw.clear_lines()
+
+            traj_vis = self._compute_traj(self.max_episode_length, self.central_env_idx.unsqueeze(0))[0]
+            traj_vis = traj_vis + self.envs_positions[self.central_env_idx]
+            point_list_0 = traj_vis[:-1].tolist()
+            point_list_1 = traj_vis[1:].tolist()
+            colors = [(1.0, 1.0, 1.0, 1.0) for _ in range(len(point_list_0))]
+            sizes = [1 for _ in range(len(point_list_0))]
+            self.draw.draw_lines(point_list_0, point_list_1, colors, sizes)
 
         # reset integral errors
         self.eIy.set_zero(env_ids)
@@ -347,24 +351,29 @@ class PayloadHover_F450(IsaacEnv):
         self.eIy_norm[env_ids] = 0.
         self.eIb1_norm[env_ids] = 0.
 
-        self.stats[env_ids] = 0.
-
     def _pre_sim_step(self, tensordict: TensorDictBase):
         actions = tensordict[("agents", "action")]
         actions = torch.clamp(actions, min = -1., max = 1.)  # clip(-1,1)
         self.effort = self.drone.apply_action(actions)
         self.spin_rotors_vis()
-        self._push_payload()
+        #self._push_payload()  #TODO
 
-    def _push_payload(self):
-        env_mask = (torch.rand(self.num_envs, device=self.device) < self.push_prob).float()  # multiplies by 0 or 1 per env → only apply force to selected ones.
-        forces = self.push_force_dist.sample((self.num_envs,))
-        forces = (
-            forces.clamp_max(self.push_force_dist.scale * 3)
-            * self.payload_masses
-            * env_mask.unsqueeze(-1)
-        )
-        self.payload.apply_forces(forces)
+        if self._should_render(0):
+            # Only render the central environment
+            env_idx = self.central_env_idx
+
+            # Clear previous points
+            self.draw.clear_points()
+
+            # Get current desired payload target
+            desired_payload_pos = self.target_pos[env_idx, 0] + self.envs_positions[env_idx]
+
+            self.draw.draw_points(
+                [Float3(*desired_payload_pos.tolist())],
+                [ColorRgba(1.0, 0.0, 0.0, 1.0)],  # red
+                [10.0]
+            )
+
 
     def _compute_state_and_obs(self):
         self.drone_state = self.drone.get_state()
@@ -408,16 +417,14 @@ class PayloadHover_F450(IsaacEnv):
         self.payload_vels = self.payload.get_velocities()
         y_dot = self.payload_vels[..., :3]
         w = self.payload_vels[..., 3:]   # in the world frame
-        '''
-        w_w = self.payload_vels[..., 3:]   # in the world frame
-        w = quat_rotate_inverse(self.quaternion.squeeze(1), w_w)  # in the body frame
-        '''
+
+        self.target_pos[:] = self._compute_traj(self.future_traj_steps, step_size=1) #TODO:step_size=5)
+
         self.drone_payload_rpos = q = (self.payload_pos.unsqueeze(1) - self.drone.pos)/self.bar_length
         q = ensure_S2(q) # re-normalization if needed
+        self.target_payload_rpos = (self.target_pos - self.payload_pos.unsqueeze(1))
 
         state = [y, y_dot, q, w, R_vec, W]
-        # print("x:",x,"y:",y)
-
         #######################################################################################
         # Dynamically compute desired angular velocity (Wd) from b1d and its derivative
         b3 = quat_axis(self.quaternion, axis=2).squeeze(1)  # (B, 3)
@@ -465,19 +472,13 @@ class PayloadHover_F450(IsaacEnv):
             obs.append(t.expand(-1, self.time_encoding_dim).unsqueeze(1))
         '''
         obs = torch.cat(obs, dim=-1)
-
+        
         # self.stats["action_smoothness"].lerp_(-self.drone.throttle_difference, (1-self.alpha))
-        # self.smoothness = (
-        #     self.drone.get_linear_smoothness()
-        #     + self.drone.get_angular_smoothness()
-        # )
-        # self.stats["motion_smoothness"].lerp_(self.smoothness, (1-self.alpha))
 
         return TensorDict(
             {
                 "agents": {
                     "observation": obs,
-                    "intrinsics": self.drone.intrinsics,
                 },
                 "stats": self.stats.clone(),
             },
@@ -526,41 +527,40 @@ class PayloadHover_F450(IsaacEnv):
 
         # Linearly scale reward from [reward_min, 0] → [0, 1]
         reward = (reward - self.reward_min) / (0.0 - self.reward_min)  # Equivalent to np.interp()
+
+        
+        # pos reward
+        pos_error = torch.norm(self.target_payload_rpos[:, [0]], dim=-1)
         '''
-        print("reward:", reward)
-        reward: tensor([[0.7237],
-                        [0.1959],
+        print("pos_error:", self.target_payload_rpos[:, [0]],"ey:", ey_norm*self.y_lim)
+        pos_error: tensor([[[ 0.1980, -0.0302,  0.0402]],[[ 0.0688, -0.2700, -0.0489]]], device='cuda:0') 
+        ey: tensor([[[-0.1980,  0.0302, -0.0402]],[[-0.0688,  0.2700,  0.0489]]], device='cuda:0')
         '''
 
         '''
-        # pos reward
-        reward_pose = 0. #torch.exp(-self.reward_distance_scale * self.target_distance)
+        reward_pos = torch.exp(-self.reward_distance_scale * pos_error)
 
         # uprightness
         tiltage = torch.abs(1 - self.drone.up[..., 2])
         reward_up = 0.5 / (1.0 + torch.square(tiltage))
 
         # effort
-        # reward_effort = self.reward_effort_weight * torch.exp(-self.effort)
-        # reward_action_smoothness = self.reward_action_smoothness_weight * torch.exp(-self.drone.throttle_difference)
+        reward_effort = self.reward_effort_weight * torch.exp(-self.effort)
+        reward_action_smoothness = self.reward_action_smoothness_weight * torch.exp(-self.drone.throttle_difference)
 
         # spin reward
         spin = torch.square(self.drone.vel[..., -1])
         reward_spin = 0.5 / (1.0 + torch.square(spin))
-        
-        reward = (
-            reward_pose
-            + reward_pose * (reward_up + reward_spin)
-            # + reward_effort
-            # + reward_action_smoothness
-        )
 
-        misbehave = (
-            (self.drone.pos[..., 2] < 0.1)
-            | (self.payload_pos[..., 2] < 0.1).unsqueeze(-1)
+        reward = (
+            reward_pos
+            + reward_pos * (reward_up + reward_spin)
+            + reward_effort
+            + reward_action_smoothness
         )
+        misbehave = (self.drone.pos[..., 2] < 0.1) | (pos_error > self.reset_thres)
         '''
-        
+
         misbehave = (
             (ey_norm.abs() >= 1.0).any(dim=-1) 
             | (ey_dot_norm.abs() >= 1.0).any(dim=-1) 
@@ -576,12 +576,12 @@ class PayloadHover_F450(IsaacEnv):
 
         # Terminal condition (Out of boundary or crashed!)
         reward[misbehave] = self.reward_crash
-
-        self.target_distance = torch.norm(self.target_payload_rpos[:, [0]], dim=-1)
         heading_alignment = torch.abs(eb1_norm).squeeze(-1)*torch.pi
 
-        self.stats["pos_error"].lerp_(self.target_distance, (1-self.alpha))
+        # self.stats["tracking_error"].add_(pos_error)
+        self.stats["pos_error"].lerp_(pos_error, (1-self.alpha))
         self.stats["heading_alignment"].lerp_(heading_alignment, (1-self.alpha))
+        # self.stats["action_smoothness"].lerp_(-self.drone.throttle_difference, (1-self.alpha))
         self.stats["return"].add_(reward)
         self.stats["episode_len"][:] = self.progress_buf.unsqueeze(1)
 
@@ -596,7 +596,37 @@ class PayloadHover_F450(IsaacEnv):
             },
             self.batch_size,
         )
-    
+
+    def _compute_traj(self, steps: int, env_ids=None, step_size: float=1.):
+        if env_ids is None:
+            env_ids = ...
+        t = self.progress_buf[env_ids].unsqueeze(1) + step_size * torch.arange(steps, device=self.device)
+        t = self.traj_t0 + scale_time(self.traj_w[env_ids].unsqueeze(1) * t * self.dt)
+        traj_rot = self.traj_rot[env_ids].unsqueeze(1).expand(-1, t.shape[1], 4)
+
+        target_pos = vmap(lemniscate)(t, self.traj_c[env_ids])
+        target_pos = vmap(quat_rotate)(traj_rot, target_pos) * self.traj_scale[env_ids].unsqueeze(1)
+
+        '''
+        print("target_pos:", target_pos, "self.origin + target_pos:", self.origin + target_pos)
+        target_pos: tensor([[[-9.9456e-03, -6.6713e-02, -2.6765e-01]],
+        [[ 1.1724e-04, -2.6116e-04, -2.0700e-01]]], device='cuda:0') 
+        self.origin + target_pos: tensor([[[-9.9456e-03, -6.6713e-02,  1.7323e+00]],
+        [[ 1.1724e-04, -2.6116e-04,  1.7930e+00]]], device='cuda:0')
+        '''
+
+        return self.origin + target_pos
+
+    def _push_payload(self):
+        env_mask = (torch.rand(self.num_envs, device=self.device) < self.push_prob).float()  # multiplies by 0 or 1 per env → only apply force to selected ones.
+        forces = self.push_force_dist.sample((self.num_envs,))
+        forces = (
+            forces.clamp_max(self.push_force_dist.scale * 3)
+            * self.payload_masses
+            * env_mask.unsqueeze(-1)
+        )
+        self.payload.apply_forces(forces)
+
     def get_norm_error_state(self, state):
         # 1. Normalize state vectors: [y, y_dot, q, w, R_vec, W]
         y_norm, y_dot_norm, q, w_norm, R_vec, W_norm = state_normalization_payload(
@@ -610,7 +640,12 @@ class PayloadHover_F450(IsaacEnv):
         Wd_norm = self.Wd / self.W_lim
 
         # 3. Compute normalized tracking errors
-        ey_norm = y_norm - yd_norm
+        ey_norm = y_norm.unsqueeze(1) - yd_norm
+        '''
+        print("y_norm:", y_norm, "yd_norm:", yd_norm)
+        y_norm: tensor([[-0.1717,  0.0040,  1.7918],[-0.0392,  0.3712,  2.2330]], device='cuda:0') 
+        yd_norm: tensor([[[-0.0072,  0.0064,  1.7573]],[[-0.0908, -0.4034,  1.7957]]], device='cuda:0')
+        '''
         ey_dot_norm = y_dot_norm - yd_dot_norm
         # eq_norm = norm_ang_btw_two_vectors(self.qd, q) # [rad]  
         eq = torch.cross(self.qd.expand_as(q), q, dim=-1)[..., :2] 
@@ -638,14 +673,8 @@ class PayloadHover_F450(IsaacEnv):
         eb1_norm = eb1 / torch.pi
 
         # 6. Update and normalize integral position error
-        self.target_payload_rpos = self.payload_pos.unsqueeze(1) - self.payload_target_pos 
-        '''
-        print("self.target_payload_rpos:",self.target_payload_rpos, "ey:",ey_norm * self.y_lim)
-        target_payload_rpos: tensor([[[ 0.0000e+00, -2.5534e-10, -3.5254e-01]],[[ 0.0000e+00, -2.5534e-10, -3.5254e-01]]], device='cuda:0') 
-        ey: tensor([[ 0.0000e+00, -2.5534e-10, -3.5254e-01],[ 0.0000e+00, -2.5534e-10, -3.5254e-01]], device='cuda:0')
-        '''
         ey = ey_norm * self.y_lim
-        eIy_integrand = -self.rwd_alpha * self.eIy.error + ey.unsqueeze(1)
+        eIy_integrand = -self.rwd_alpha * self.eIy.error + ey#.unsqueeze(1)
         self.eIy.integrate(eIy_integrand, self.dt)
         self.eIy_norm = torch.clamp(
             self.eIy.error / self.eIy_lim,

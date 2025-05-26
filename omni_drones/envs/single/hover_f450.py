@@ -210,8 +210,8 @@ class Hover_F450(IsaacEnv):
         self.Cb1 = 6.0
         self.CIb1 = 0.1
         self.CW = 0.6
-        self.alpha = 0.01
-        self.beta = 0.05
+        self.rwd_alpha = 0.01
+        self.rwd_beta = 0.05
         # Compute reward_min for normalization
         self.reward_min = -torch.ceil(torch.tensor(
             self.Cx + self.CIx + self.Cv + self.Cb1 + self.CIb1 + self.CW,
@@ -716,7 +716,7 @@ class Hover_F450(IsaacEnv):
 
         # 6. Update and normalize integral position error
         ex = ex_norm * self.x_lim
-        eIx_integrand = -self.alpha * self.eIx.error + ex
+        eIx_integrand = -self.rwd_alpha * self.eIx.error + ex
         self.eIx.integrate(eIx_integrand, self.dt)
         self.eIx_norm = torch.clamp(
             self.eIx.error / self.eIx_lim,
@@ -725,7 +725,7 @@ class Hover_F450(IsaacEnv):
         )
 
         # 7. Update and normalize integral heading error
-        eIb1_integrand = -self.beta * self.eIb1.error + eb1
+        eIb1_integrand = -self.rwd_beta * self.eIb1.error + eb1
         self.eIb1.integrate(eIb1_integrand, self.dt)
         self.eIb1_norm = torch.clamp(
             self.eIb1.error / self.eIb1_lim,

@@ -34,7 +34,7 @@ def attach_payload(
     bar_length: float,
     payload_radius: float = 0.04,
     payload_mass: float = 0.3,
-    drone_scale: float = 1.35  # <- add this
+    drone_scale: float = 1.35
 ):
     # Compensate the bar's size and offsets
     scaled_bar_length = bar_length / drone_scale

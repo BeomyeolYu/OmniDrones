@@ -24,4 +24,5 @@
 from .payload_hover import PayloadHover
 from .payload_hover_f450 import PayloadHover_F450
 from .payload_track import PayloadTrack
+from .payload_track_f450 import PayloadTrack_F450
 from .payload_fly_through import PayloadFlyThrough
