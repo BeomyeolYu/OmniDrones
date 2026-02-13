@@ -45,99 +45,6 @@ from .common import GAE
 
 from ..emlp_torch.ppo_emlp import EMLP_MONO_Actor_PPO, EMLP_MONO_Critic_PPO
 
-@dataclass
-class PPOConfig:
-    name: str = "ppo"
-
-    framestack: bool = False
-
-    ############## Step 3: Delta action model ######################
-    domain_adaptation: bool = True 
-
-    # actor_hidden_dim:  int = 32 # BEST:32  #(default: [256, 256, 256]) 
-    # critic_hidden_dim: int = 256 # BEST:256 #(default: [256, 256, 256])
-    # actor_hidden_dim:  int = 512 #256 # BEST:32  #(default: [256, 256, 256]) 
-    # critic_hidden_dim: int = 1024 #512 # BEST:256 #(default: [256, 256, 256])
-    # 3 hidden layers:
-    # actor_hidden_dim:  [512, 256, 128]
-    # critic_hidden_dim: [512, 256, 128]
-
-    GAE_lambda: float = 0.98 #0.99 # BEST: 0.9 #(default: 0.95) 
-
-    lam_T: float = 0.5 #0.3 #0.4 #0.2 #0.8 #0.25 # BEST:0.2 #(default: 0.4)
-    lam_S: float = 0.4 #0.2 #0.3 #0.1 #0.5 #0.1  # BEST:0.1 #(default: 0.3)
-    lam_M: float = 0.6 #0.4 #0.5 #0.3 #1.0 #0.3  # BEST:0.3 #(default: 0.6)
-
-    ## CyclicLR
-    lr_a_min: float = 3e-7
-    lr_a: float =     3e-7
-    lr_a_max: float = 3e-4
-    lr_a_step_up: int = 10_000 #20_000
-    lr_c_min: float = 1e-6
-    lr_c: float =     1e-6
-    lr_c_max: float = 1e-3
-    lr_c_step_up: int = 10_000 #20_000
-
-    train_every: int = 64 #512# BEST:1024  #(default: 32) 
-    ppo_epochs: int = 6 #20 #4  # BEST: 20 #(default: 4) 
-    num_minibatches: int = 16 #64 # BEST:128 #(default: 16)
-    critic_updates_per_batch: int = 6  # decoupled Update Frequency
-    clip_param: float = 0.1 # BEST:0.2 #(default: 0.1) 
-    entropy_coef: float = 0.07 #0.05 #0.1 #0.02 # BEST:0.01 #(default: 0.001) 
-    entropy_coef_final: float = 0.01  # BEST:0.001 
-    entropy_decay_steps: int = 10_000 # BEST:300 
-   
-    ############## Pre-training / Fine-tuning / Real data collection ############################
-    domain_adaptation: bool = False
-    
-    ## CosineAnnealingWarmRestarts
-    lr_a: float = 5e-5 #3e-4  # BEST:3e-4   #(default: 5e-4) 
-    lr_c: float = 1e-4 #2e-4  # BEST:2e-4   #(default: 5e-4) 
-    eta_min: float = 1e-6  # BEST:1e-5  
-    scheduler_T_0: int = 20000 #50_000_000
-
-    # lr_a: float = 2e-4  # BEST:3e-4   #(default: 5e-4) 
-    # lr_c: float = 3e-4  # BEST:2e-4   #(default: 5e-4) 
-    # eta_min: float = 1e-5  # BEST:1e-5  
-    # scheduler_T_0: int = 50_000_000
-
-    actor_hidden_dim:  int = 32 # BEST:32  #(default: [256, 256, 256]) 
-    critic_hidden_dim: int = 256 # BEST:256 #(default: [256, 256, 256])
-
-    GAE_lambda: float = 0.9 # BEST: 0.9 #(default: 0.95) 
-
-    lam_T: float = 0. #0.2  # BEST:0.2 #(default: 0.4)
-    lam_S: float = 0. #0.1  # BEST:0.1 #(default: 0.3)
-    lam_M: float = 0. #0.3  # BEST:0.3 #(default: 0.6)
-
-    train_every: int = 512 #1024 #BEST:1024  #(default: 32) 
-    ppo_epochs: int = 10 #20  # BEST: 20 #(default: 4) 
-    num_minibatches: int = 64 #128 # BEST:128 #(default: 16)
-    critic_updates_per_batch: int = 6  # decoupled Update Frequency
-    clip_param: float = 0.1 #0.2 # BEST:0.2 #(default: 0.1) 
-    entropy_coef: float = 0.02 # BEST:0.01 #(default: 0.001) 
-    entropy_coef_final: float = 0.01 #0.001  # BEST:0.001 
-    entropy_decay_steps: int = 300 # BEST:300 
-    ################################################
-
-    gamma: float = 0.99  #(default: 0.99)
-    grad_max_norm: float = 10  # BEST: 10 #(default: 5) 
-
-    # whether to use equivariant reinforcement learning
-    use_equiv: bool = False
-
-    # whether to use privileged information
-    priv_actor: bool = False
-    priv_critic: bool = False
-
-    checkpoint_path: Union[str, None] = None
-
-
-cs = ConfigStore.instance()
-cs.store("ppo", node=PPOConfig, group="algo")
-cs.store("ppo_priv", node=PPOConfig(priv_actor=True, priv_critic=True), group="algo")
-cs.store("ppo_priv_critic", node=PPOConfig(priv_critic=True), group="algo")
-
 
 def make_mlp(num_units):
     layers = []
@@ -177,7 +84,7 @@ class PPOPolicy(TensorDictModuleBase):
 
     def __init__(
         self,
-        cfg: PPOConfig,
+        cfg, # cfg is now a DictConfig loaded from YAML
         observation_spec: CompositeSpec,
         action_spec: CompositeSpec,
         reward_spec: TensorSpec,
@@ -192,6 +99,8 @@ class PPOPolicy(TensorDictModuleBase):
             # The input to the policy is now the stacked observation.
             # We will add a flattening layer to handle the stacked frames.
             OBS_KEY = ("agents", "observation_stacked")
+        else:
+            OBS_KEY = ("agents", "observation")
 
         self.entropy_coef = self.cfg.entropy_coef
         self.clip_param = self.cfg.clip_param
@@ -254,20 +163,11 @@ class PPOPolicy(TensorDictModuleBase):
                         [("agents", "observation")], ["loc", "scale"]
                     )
                     """
-                    if self.cfg.domain_adaptation:
-                        actor_module=TensorDictModule(
-                            nn.Sequential(make_mlp([512, 256, 128]), Actor(self.action_dim)),
-                            [("agents", "observation")], ["loc", "scale"]
-                        )
-                    else:
-                        actor_module=TensorDictModule(
-                            nn.Sequential(make_mlp([self.cfg.actor_hidden_dim, self.cfg.actor_hidden_dim]), Actor(self.action_dim)),
-                            [("agents", "observation")], ["loc", "scale"]
-                        )
-                    # actor_module=TensorDictModule(
-                    #     nn.Sequential(make_mlp([512, 256, 128]), Actor(self.action_dim)),
-                    #     [("agents", "observation")], ["loc", "scale"]
-                    # )
+                    actor_module=TensorDictModule(
+                        nn.Sequential(make_mlp([self.cfg.actor_hidden_dim, self.cfg.actor_hidden_dim]), Actor(self.action_dim)),
+                        [("agents", "observation")], ["loc", "scale"]
+                    )
+
             self.actor: ProbabilisticActor = ProbabilisticActor(
                 module=actor_module,
                 in_keys=["loc", "scale"],
@@ -316,21 +216,10 @@ class PPOPolicy(TensorDictModuleBase):
                         [("agents", "observation")], ["state_value"]
                     ).to(self.device)"
                     """
-                    if self.cfg.domain_adaptation:
-                        self.critic = TensorDictModule(
-                            nn.Sequential(make_mlp([512, 256, 128]), nn.LazyLinear(1)),
-                            [("agents", "observation")], ["state_value"]
-                        ).to(self.device)
-                    else:
-                        self.critic = TensorDictModule(
-                            nn.Sequential(make_mlp([self.cfg.critic_hidden_dim, self.cfg.critic_hidden_dim]), nn.LazyLinear(1)),
-                            [("agents", "observation")], ["state_value"]
-                        ).to(self.device)
-                    # self.critic = TensorDictModule(
-                    #     nn.Sequential(make_mlp([512, 256, 128]), nn.LazyLinear(1)),
-                    #     [("agents", "observation")], ["state_value"]
-                    # ).to(self.device)
-
+                    self.critic = TensorDictModule(
+                        nn.Sequential(make_mlp([self.cfg.critic_hidden_dim, self.cfg.critic_hidden_dim]), nn.LazyLinear(1)),
+                        [("agents", "observation")], ["state_value"]
+                    ).to(self.device)
 
         self.actor(fake_input)
         self.critic(fake_input)
@@ -351,13 +240,27 @@ class PPOPolicy(TensorDictModuleBase):
         self.critic_opt = torch.optim.AdamW(self.critic.parameters(), lr=self.cfg.lr_c)  #(default: Adam)
         self.value_norm = ValueNorm1(reward_spec.shape[-2:]).to(self.device)
 
-        # Add cosine annealing with warm restarts
-        if self.cfg.domain_adaptation:
-            self.actor_scheduler = CyclicLR(self.actor_opt, base_lr=self.cfg.lr_a_min, max_lr=self.cfg.lr_a_max, step_size_up=self.cfg.lr_a_step_up, mode="triangular2")
-            self.critic_scheduler = CyclicLR(self.critic_opt, base_lr=self.cfg.lr_c_min, max_lr=self.cfg.lr_c_max, step_size_up=self.cfg.lr_c_step_up, mode="triangular2")
+        # --- Dynamic Scheduler Selection ---
+        if self.cfg.scheduler.name == "CosineAnnealingWarmRestarts":
+            self.actor_scheduler = CosineAnnealingWarmRestarts(
+                self.actor_opt, T_0=self.cfg.scheduler.T_0, eta_min=self.cfg.scheduler.eta_min
+            )
+            self.critic_scheduler = CosineAnnealingWarmRestarts(
+                self.critic_opt, T_0=self.cfg.scheduler.T_0, eta_min=self.cfg.scheduler.eta_min
+            )
+        elif self.cfg.scheduler.name == "CyclicLR":
+            self.actor_scheduler = CyclicLR(
+                self.actor_opt, base_lr=self.cfg.scheduler.lr_a_min, max_lr=self.cfg.scheduler.lr_a_max, 
+                step_size_up=self.cfg.scheduler.lr_a_step_up, mode="triangular2"
+            )
+            self.critic_scheduler = CyclicLR(
+                self.critic_opt, base_lr=self.cfg.scheduler.lr_c_min, max_lr=self.cfg.scheduler.lr_c_max, 
+                step_size_up=self.cfg.scheduler.lr_c_step_up, mode="triangular2"
+            )
         else:
-            self.actor_scheduler = CosineAnnealingWarmRestarts(self.actor_opt, T_0=self.cfg.scheduler_T_0, eta_min=self.cfg.eta_min)
-            self.critic_scheduler = CosineAnnealingWarmRestarts(self.critic_opt, T_0=self.cfg.scheduler_T_0, eta_min=self.cfg.eta_min)
+            # Fallback to a scheduler that does nothing
+            self.actor_scheduler = torch.optim.lr_scheduler.LambdaLR(self.actor_opt, lr_lambda=lambda epoch: 1.0)
+            self.critic_scheduler = torch.optim.lr_scheduler.LambdaLR(self.critic_opt, lr_lambda=lambda epoch: 1.0)
 
 
     def get_entropy_coef(self, current_step: int):
@@ -618,13 +521,12 @@ class PPOPolicy(TensorDictModuleBase):
     # Regularizing action policies for smooth control
     def policy_regularization(self, actor, actor_loss, tensordict):
         if self.cfg.framestack:
-            # This function also needs to use the stacked observation
             OBS_KEY = ("agents", "observation_stacked")
-            batch_obs = tensordict[OBS_KEY]
-            batch_obs_next = tensordict[("next", OBS_KEY)]
         else:
-            batch_obs = tensordict[("agents", "observation")]
-            batch_obs_next = tensordict[("next", "agents", "observation")]
+            OBS_KEY = ("agents", "observation")
+
+        batch_obs = tensordict[OBS_KEY]
+        batch_obs_next = tensordict[("next", OBS_KEY)]
 
         # Retrieving a recent set of actions:
         batch_act = actor(batch_obs)[0].clamp(-self.max_action, self.max_action)

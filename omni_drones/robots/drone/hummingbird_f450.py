@@ -94,6 +94,10 @@ class Hummingbird_F450(MultirotorBase):
             self.base_link = self._view
             self.prim_paths_expr = prim_paths_expr
 
+        # coms = torch.tensor([[0.02, 0.02, 0.02]], device=self.device).clone()
+        # self.base_link.set_coms(coms)
+        # print("---------", self.base_link.get_coms())
+
         '''
         self.rotors_view = RigidPrimView(
             # prim_paths_expr=f"{self.prim_paths_expr}/rotor_[0-{self.num_rotors-1}]",
@@ -196,17 +200,17 @@ class Hummingbird_F450(MultirotorBase):
                 low = self.INERTIA_0 * torch.as_tensor(inertia_scale[0], device=self.device)
                 high = self.INERTIA_0 * torch.as_tensor(inertia_scale[1], device=self.device)
                 self.randomization[phase]["inertia"] = D.Uniform(low, high)
+            c_tf_scale = cfg[phase].get("c_tf_scale", None)
+            if c_tf_scale is not None:
+                low = self.c_tf_0 * c_tf_scale[0]
+                high = self.c_tf_0 * c_tf_scale[1]
+                self.randomization[phase]["c_tf"] = D.Uniform(low, high)
             com = cfg[phase].get("com", None)
             if com is not None:
                 self.randomization[phase]["com"] = D.Uniform(
                     torch.tensor(com[0], device=self.device),
                     torch.tensor(com[1], device=self.device)
                 )
-            c_tf_scale = cfg[phase].get("c_tf_scale", None)
-            if c_tf_scale is not None:
-                low = self.c_tf_0 * c_tf_scale[0]
-                high = self.c_tf_0 * c_tf_scale[1]
-                self.randomization[phase]["c_tf"] = D.Uniform(low, high)
             '''
             t2w_scale = cfg[phase].get("t2w_scale", None)
             if t2w_scale is not None:
@@ -292,6 +296,7 @@ class Hummingbird_F450(MultirotorBase):
         if "com" in distributions:
             coms = distributions["com"].sample((*shape, 3))
             self.base_link.set_coms(coms, env_indices=env_ids)
+            # print(self.base_link.get_coms(env_indices=env_ids))
             self.intrinsics["com"][env_ids] = coms.reshape(*shape, 1, 3)
         if "c_tf" in distributions:
             c_tf = distributions["c_tf"].sample(shape)
@@ -323,10 +328,12 @@ class Hummingbird_F450(MultirotorBase):
         '''
 
     def vmap_fMs(self, cmds, masses, c_tfs):
-        # reg_M = 0.2 # TODO: # moment regularization scaling
-
         # normalized force and moment components [-1,1]
-        f_norm, M = cmds[..., 0:1], cmds[..., 1:]#*reg_M  
+        f_norm, M_norm = cmds[..., 0:1], cmds[..., 1:]
+
+        # Scale the normalized control moment to a physical range
+        max_moment = 2.0  # torque scaling in [N·m]
+        M = M_norm * max_moment
         '''
         print("f_norm:", f_norm, "M:", M)
         f_norm: BatchedTensor(lvl=1, bdim=0, value=
@@ -403,49 +410,63 @@ class Hummingbird_F450(MultirotorBase):
         '''
         return f.unsqueeze(-2), M.unsqueeze(-2)  # Expand to match expected shape
 
+    # def apply_action(self, actions: torch.Tensor) -> torch.Tensor:
+    #     fMs = actions.expand(*self.shape, self.num_rotors)  # [f, M]s from RL algos
+
+    #     # Apply vmap to directly process force and moments per drone
+    #     forces, torques = vmap(self.vmap_fMs)(
+    #         fMs, self.masses.squeeze(-1), self.c_tfs.squeeze(-1))
+    #     forces = forces.squeeze(-3)  # ensure [num_envs, 1, 3]
+    #     torques = torques.squeeze(-3)  # ensure [num_envs, 1, 3]
+
+    #     # Store force and torque in the simulation
+    #     self.forces[:] = forces
+    #     self.torques[:] = torques
+    #     '''
+    #     print("self.forces:", self.forces, "self.torques:", self.torques)
+    #     self.forces: tensor([[[ 0.0000,  0.0000, 26.3301]],
+    #             [[ 0.0000,  0.0000, 40.9006]],
+    #             [[ 0.0000,  0.0000, 13.9086]]], device='cuda:0') 
+    #     self.torques: tensor([[[ 0.7770, -1.0000, -0.9944]],
+    #             [[ 1.0000, -0.2193,  0.5457]],
+    #             [[-0.8583,  0.3920,  0.6740]]], device='cuda:0')
+    #     '''
+    #     # Apply forces and torques to the drone body
+    #     self.base_link.apply_forces_and_torques_at_pos(
+    #         self.forces.reshape(-1, 3),
+    #         self.torques.reshape(-1, 3),
+    #         is_global=False
+    #     )
+    #     return self.forces.sum(-1)
+    
     def apply_action(self, actions: torch.Tensor) -> torch.Tensor:
-        fMs = actions.expand(*self.shape, self.num_rotors)  # [f, M]s from RL algos
+        fMs = actions.expand(*self.shape, self.num_rotors)
 
         # Apply vmap to directly process force and moments per drone
         forces, torques = vmap(self.vmap_fMs)(
             fMs, self.masses.squeeze(-1), self.c_tfs.squeeze(-1))
-        forces = forces.squeeze(-3)  # ensure [num_envs, 1, 3]
-        torques = torques.squeeze(-3)  # ensure [num_envs, 1, 3]
+        
+        # Store the calculated force and torque
+        self.forces[:] = forces.squeeze(-3)
+        self.torques[:] = torques.squeeze(-3)
 
-        # Store force and torque in the simulation
-        self.forces[:] = forces
-        self.torques[:] = torques
-        '''
-        print("self.forces:", self.forces, "self.torques:", self.torques)
-        self.forces: tensor([[[ 0.0000,  0.0000, 26.3301]],
-                [[ 0.0000,  0.0000, 40.9006]],
-                [[ 0.0000,  0.0000, 13.9086]]], device='cuda:0') 
-        self.torques: tensor([[[ 0.7770, -1.0000, -0.9944]],
-                [[ 1.0000, -0.2193,  0.5457]],
-                [[-0.8583,  0.3920,  0.6740]]], device='cuda:0')
-        '''
-        # Apply forces and torques to the drone body
-        self.base_link.apply_forces_and_torques_at_pos(
-            self.forces.reshape(-1, 3),
-            self.torques.reshape(-1, 3),
-            is_global=False
-        )
+        # THE FIX: Return the calculated force and torque instead of applying them.
+        return self.forces, self.torques
 
-        # # spin spinning rotors
-        # self.dof_vel = self.drone.base_link.get_joint_velocities()
-        # prop_rot = self.thrust_cmds_damp * self.prop_max_rot
-        # self.dof_vel[:, 0] = prop_rot[:, 0]
-        # self.dof_vel[:, 1] = -1.0 * prop_rot[:, 1]
-        # self.dof_vel[:, 2] = prop_rot[:, 2]
-        # self.dof_vel[:, 3] = -1.0 * prop_rot[:, 3]
-        # self.drone.base_link.set_joint_velocities(self.dof_vel)
-
-        # self.M_b = torch.tensor([self.M_b[0], -self.M_b[1], -self.M_b[2]], device=self.device)
-        # self.drone.base_link.rigid_body.apply_forces_and_torques_at_pos(self.f_b, self.M_b, is_global = False)
-        # # print(self.f_b, self.M_b)
-        return self.forces.sum(-1)
-
-
+    def get_thrust_limits(self):
+        """
+        Calculates and returns the total minimum and maximum thrust for the drone
+        based on its current physical properties.
+        """
+        # This logic is copied directly from your vmap_fMs function
+        total_masses = self.masses.squeeze(-1) + (0.099 * 4)
+        hover_force = total_masses * 9.81 / 4.
+        max_force = self.c_tfs.squeeze(-1) * hover_force
+        min_force = torch.full_like(max_force, 0.5)
+        
+        # Return the total force limits [N] for all four rotors
+        return (4 * min_force, 4 * max_force)
+    
     """
     def apply_action(self, actions: torch.Tensor) -> torch.Tensor:
         rotor_cmds = actions.expand(*self.shape, self.num_rotors)  # from RL algos

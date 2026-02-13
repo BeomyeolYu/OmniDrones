@@ -86,6 +86,21 @@ def main(cfg):
     except KeyError:
         raise NotImplementedError(f"Unknown algorithm: {cfg.algo.name}")
 
+    '''
+    # Path of the directory containing train_f450.py
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Build absolute path to the pretrained checkpoint
+    pretrained_ckpt_name = cfg.get("pretrained_ckpt_path", None)
+    if pretrained_ckpt_name:
+        pretrained_ckpt_path = os.path.join(base_dir, pretrained_ckpt_name)
+        if os.path.exists(pretrained_ckpt_path):
+            print(f"Loading pretrained model from {pretrained_ckpt_path}")
+            policy.load_state_dict(torch.load(pretrained_ckpt_path, map_location=base_env.device, weights_only=True))
+        else:
+            print(f"[Warning] Checkpoint path {pretrained_ckpt_path} not found.")
+    '''
+
     frames_per_batch = env.num_envs * int(cfg.algo.train_every)
     total_frames = cfg.get("total_frames", -1) // frames_per_batch * frames_per_batch
     max_iters = cfg.get("max_iters", -1)
@@ -181,8 +196,14 @@ def main(cfg):
             return_value = stats['train/stats.return']
             info.update(stats)
 
+            ey = stats.get('train/stats.ey', 0) 
+
         info.update(policy.train_op(data.to_tensordict(),i))
 
+        # Log current learning rates ---
+        info["train/lr_a"] = policy.actor_opt.param_groups[0]['lr']
+        info["train/lr_c"] = policy.critic_opt.param_groups[0]['lr']
+        
         if eval_interval > 0 and i % eval_interval == 0:
             logging.info(f"Eval at {collector._frames} steps.")
             info.update(evaluate())
@@ -190,7 +211,7 @@ def main(cfg):
             base_env.train()
 
         # if save_interval > 0 and i % save_interval == 0:
-        if save_interval > 0 and return_value > best_return_value:
+        if save_interval > 0 and return_value > best_return_value and ey < 0.2:
             try:
                 ckpt_path = os.path.join(run.dir, f"checkpoint_{collector._frames}.pth")
                 torch.save(policy.state_dict(), ckpt_path)

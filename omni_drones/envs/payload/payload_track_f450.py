@@ -395,6 +395,10 @@ class PayloadTrack_F450(IsaacEnv):
         b1 = self.drone_state[..., 13:16]
         b3 = self.drone_state[..., 16:19]
 
+
+        # Quadrotor states
+        x = self.get_env_poses(self.drone.get_world_poses())[0]
+        x_dot = self.drone.get_velocities()[..., :3].squeeze(1)
         # Get rotation matrix
         R = quaternion_to_rotation_matrix(self.quaternion).reshape(self.quaternion.shape[:-1] + (3, 3))
         R = R.reshape(-1, 3, 3)  # Ensure shape is [N, 3, 3]
@@ -416,12 +420,12 @@ class PayloadTrack_F450(IsaacEnv):
         self.payload_pos = y = self.get_env_poses(self.payload.get_world_poses())[0]
         self.payload_vels = self.payload.get_velocities()
         y_dot = self.payload_vels[..., :3]
-        w = self.payload_vels[..., 3:]   # in the world frame
-
-        self.target_pos[:] = self._compute_traj(self.future_traj_steps, step_size=1) #TODO:step_size=5)
-
+        #w = self.payload_vels[..., 3:]   # in the world frame
         self.drone_payload_rpos = q = (self.payload_pos.unsqueeze(1) - self.drone.pos)/self.bar_length
         q = ensure_S2(q) # re-normalization if needed
+        w = torch.cross(q.squeeze(1), (y_dot - x_dot), dim=-1) / self.bar_length  # bar angular velocity (world frame)
+
+        self.target_pos[:] = self._compute_traj(self.future_traj_steps, step_size=1) #TODO:step_size=5)
         self.target_payload_rpos = (self.target_pos - self.payload_pos.unsqueeze(1))
 
         state = [y, y_dot, q, w, R_vec, W]

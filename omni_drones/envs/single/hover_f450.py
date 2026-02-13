@@ -305,7 +305,7 @@ class Hover_F450(IsaacEnv):
 
     def _reset_idx(self, env_ids: torch.Tensor):  # This method to reset sub-environment instances given by `env_ids`.
         self.drone._reset_idx(env_ids, self.training)
-
+        
         # Spawning at the origin position and at zero angle (w/ random linear and angular velocity).
         rand_chance = random.random()  # generate a random float between 0.0 and 1.0
         if rand_chance < 0.2: # 20% of the training
@@ -340,6 +340,8 @@ class Hover_F450(IsaacEnv):
         target_rot = euler_to_quaternion(target_rpy)
         self.target_heading[env_ids] = quat_axis(target_rot.squeeze(1), 0).unsqueeze(1)
         self.target_vis.set_world_poses(orientations=target_rot, env_indices=env_ids)
+
+        # print(self.drone.get_joint_positions(True), self.drone.get_joint_velocities())
 
         # reset integral errors
         self.eIx.set_zero(env_ids)

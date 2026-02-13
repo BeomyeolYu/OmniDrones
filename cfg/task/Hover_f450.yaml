@@ -38,9 +38,9 @@ randomization:
 #       drag_coef_scale: [0, 0.62]
 #       tau_up: [0.2, 1.0]
 #       tau_down: [0.2, 1.0]
-#   payload:
-#     z: [-0.1, 0.1]
-#     mass: [0.01, 1.0]
+#  payload:
+#    z: [-0.1, 0.1]
+#    mass: [0.01, 1.0]
 
 reward_effort_weight: 0.1
 reward_action_smoothness_weight: 0.0

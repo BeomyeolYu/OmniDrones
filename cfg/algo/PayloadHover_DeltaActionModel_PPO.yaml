@@ -1,0 +1,43 @@
+# @package _group_
+# Hyperparameters for the Delta Action Model training stage.
+
+name: ppo
+
+domain_adaptation: true
+framestack: false  #TODO
+use_equiv: false
+priv_actor: false
+priv_critic: false
+checkpoint_path: null
+
+actor_hidden_dim: 32 # BEST:32  #(default: [256, 256, 256]) 
+critic_hidden_dim: 256 # BEST:256 #(default: [256, 256, 256])
+
+gamma: 0.99  #(default: 0.99)
+GAE_lambda: 0.99 # BEST: 0.9 #(default: 0.95) 
+grad_max_norm: 10.0  # BEST: 10 #(default: 5) 
+
+train_every: 64  #512# BEST:1024  #(default: 32) 
+ppo_epochs: 6  #20 #4  # BEST: 20 #(default: 4) 
+num_minibatches: 16 #64 # BEST:128 #(default: 16)
+clip_param: 0.1  # BEST:0.2 #(default: 0.1) 
+entropy_coef: 0.02  # BEST:0.01 #(default: 0.001) 
+entropy_coef_final: 0.01  # BEST:0.001 
+entropy_decay_steps: 10_000 # BEST:300 
+
+# Regularization lambdas
+lam_T: 0.02  # BEST:0.2 #(default: 0.4)
+lam_S: 0.01  # BEST:0.1 #(default: 0.3)
+lam_M: 0.1   # BEST:0.3 #(default: 0.6)
+
+# Scheduler config
+scheduler:
+  name: "CyclicLR"
+  lr_a: 3e-7  # Starting LR for optimizer
+  lr_a_min: 3e-7
+  lr_a_max: 3e-4
+  lr_a_step_up: 10_000
+  lr_c: 1e-6  # Starting LR for optimizer
+  lr_c_min: 1e-6
+  lr_c_max: 1e-3
+  lr_c_step_up: 10_000

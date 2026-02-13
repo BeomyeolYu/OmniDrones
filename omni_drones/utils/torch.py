@@ -81,6 +81,151 @@ def others(x: torch.Tensor) -> torch.Tensor:
     return off_diag(x.expand(x.shape[0], *x.shape))
 
 
+# def rotation_matrix_to_quaternion(R: torch.Tensor) -> torch.Tensor:
+#     """Convert a batch of rotation matrices to quaternions (x, y, z, w)."""
+#     assert R.shape[-2:] == (3, 3)
+#     m = R
+#     t = m[..., 0, 0] + m[..., 1, 1] + m[..., 2, 2]
+
+#     def quat_from_diag_max(i):
+#         qw = torch.sqrt(1.0 + m[..., i, i] - m[..., (i+1)%3, (i+1)%3] - m[..., (i+2)%3, (i+2)%3]) * 0.5
+#         q = torch.zeros_like(m[..., 0, 0].unsqueeze(-1).repeat(1, 4))
+#         q[..., i] = qw
+#         q[..., (i+1)%3] = (m[..., i, (i+1)%3] + m[..., (i+1)%3, i]) / (4.0 * qw)
+#         q[..., (i+2)%3] = (m[..., i, (i+2)%3] + m[..., (i+2)%3, i]) / (4.0 * qw)
+#         q[..., 3] = (m[..., (i+2)%3, (i+1)%3] - m[..., (i+1)%3, (i+2)%3]) / (4.0 * qw)
+#         return q
+
+#     q = torch.where(
+#         (t > 0)[..., None],
+#         torch.stack([
+#             (m[..., 2, 1] - m[..., 1, 2]),
+#             (m[..., 0, 2] - m[..., 2, 0]),
+#             (m[..., 1, 0] - m[..., 0, 1]),
+#             1.0 + t
+#         ], dim=-1) * 0.5 / torch.sqrt(1.0 + t[..., None]),
+#         quat_from_diag_max(0)  # fall back to numerically stable case
+#     )
+
+#     q = q / q.norm(dim=-1, keepdim=True)
+#     return q  # [x, y, z, w]
+
+# def rotation_matrix_to_quaternion(R: torch.Tensor) -> torch.Tensor:
+#     """
+#     Convert a batch of rotation matrices to quaternions (w, x, y, z) format.
+#     Args:
+#         R: (B, 3, 3) torch tensor
+#     Returns:
+#         Quaternion: (B, 4) torch tensor in (w, x, y, z)
+#     """
+#     m = R
+#     t = m[..., 0, 0] + m[..., 1, 1] + m[..., 2, 2]
+
+#     qw = 0.5 * torch.sqrt(1.0 + t + 1e-8)
+#     qx = (m[..., 2, 1] - m[..., 1, 2]) / (4.0 * qw + 1e-8)
+#     qy = (m[..., 0, 2] - m[..., 2, 0]) / (4.0 * qw + 1e-8)
+#     qz = (m[..., 1, 0] - m[..., 0, 1]) / (4.0 * qw + 1e-8)
+
+#     quat = torch.stack([qw, qx, qy, qz], dim=-1)
+#     return quat / quat.norm(dim=-1, keepdim=True)
+
+def rotation_matrix_to_quaternion(R: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a batch of 3x3 rotation matrices to quaternions in (w, x, y, z) format.
+    Args:
+        R: (..., 3, 3) rotation matrices
+    Returns:
+        (..., 4) quaternions
+    """
+    assert R.shape[-2:] == (3, 3), "Input must be of shape (..., 3, 3)"
+
+    m00 = R[..., 0, 0]
+    m11 = R[..., 1, 1]
+    m22 = R[..., 2, 2]
+    trace = m00 + m11 + m22
+
+    qw = torch.zeros_like(trace)
+    qx = torch.zeros_like(trace)
+    qy = torch.zeros_like(trace)
+    qz = torch.zeros_like(trace)
+
+    cond = trace > 0
+    s = torch.sqrt(trace[cond] + 1.0) * 2.0
+    qw[cond] = 0.25 * s
+    qx[cond] = (R[..., 2, 1][cond] - R[..., 1, 2][cond]) / s
+    qy[cond] = (R[..., 0, 2][cond] - R[..., 2, 0][cond]) / s
+    qz[cond] = (R[..., 1, 0][cond] - R[..., 0, 1][cond]) / s
+
+    cond1 = (R[..., 0, 0] > R[..., 1, 1]) & (R[..., 0, 0] > R[..., 2, 2]) & ~cond
+    s1 = torch.sqrt(1.0 + R[..., 0, 0][cond1] - R[..., 1, 1][cond1] - R[..., 2, 2][cond1]) * 2.0
+    qw[cond1] = (R[..., 2, 1][cond1] - R[..., 1, 2][cond1]) / s1
+    qx[cond1] = 0.25 * s1
+    qy[cond1] = (R[..., 0, 1][cond1] + R[..., 1, 0][cond1]) / s1
+    qz[cond1] = (R[..., 0, 2][cond1] + R[..., 2, 0][cond1]) / s1
+
+    cond2 = (R[..., 1, 1] > R[..., 2, 2]) & ~cond & ~cond1
+    s2 = torch.sqrt(1.0 + R[..., 1, 1][cond2] - R[..., 0, 0][cond2] - R[..., 2, 2][cond2]) * 2.0
+    qw[cond2] = (R[..., 0, 2][cond2] - R[..., 2, 0][cond2]) / s2
+    qx[cond2] = (R[..., 0, 1][cond2] + R[..., 1, 0][cond2]) / s2
+    qy[cond2] = 0.25 * s2
+    qz[cond2] = (R[..., 1, 2][cond2] + R[..., 2, 1][cond2]) / s2
+
+    cond3 = ~cond & ~cond1 & ~cond2
+    s3 = torch.sqrt(1.0 + R[..., 2, 2][cond3] - R[..., 0, 0][cond3] - R[..., 1, 1][cond3]) * 2.0
+    qw[cond3] = (R[..., 1, 0][cond3] - R[..., 0, 1][cond3]) / s3
+    qx[cond3] = (R[..., 0, 2][cond3] + R[..., 2, 0][cond3]) / s3
+    qy[cond3] = (R[..., 1, 2][cond3] + R[..., 2, 1][cond3]) / s3
+    qz[cond3] = 0.25 * s3
+
+    quat = torch.stack([qw, qx, qy, qz], dim=-1)
+    return quat / quat.norm(dim=-1, keepdim=True)
+
+import torch
+import torch.nn.functional as F
+import torch
+import torch.nn.functional as F
+
+def vector_to_quat(target: torch.Tensor, source: torch.Tensor = None) -> torch.Tensor:
+    """
+    Compute quaternion to rotate `source` direction to `target` direction.
+
+    Args:
+        target: Target direction vectors of shape [B, 3]
+        source: Source reference direction vectors of shape [B, 3] or [3]. Defaults to [0, 0, -1]
+
+    Returns:
+        Quaternion tensor of shape [B, 4] in (w, x, y, z) format
+    """
+    B = target.shape[0]
+    if source is None:
+        source = torch.tensor([0., 0., -1.], device=target.device).expand(B, 3)
+    elif source.ndim == 1:
+        source = source.unsqueeze(0).expand(B, 3)
+
+    target = F.normalize(target, dim=-1)
+    source = F.normalize(source, dim=-1)
+
+    v = torch.cross(source, target, dim=-1)
+    c = (source * target).sum(dim=-1, keepdim=True)
+
+    # handle nearly opposite vectors (180° rotation)
+    mask = (c < -0.9999).squeeze(-1)
+    if mask.any():
+        # Pick an orthogonal axis to rotate 180° around
+        alt = torch.cross(source[mask], torch.tensor([1., 0., 0.], device=target.device))
+        alt = F.normalize(alt, dim=-1)
+        q = torch.zeros((B, 4), device=target.device)
+        q[mask, 1:] = alt
+        # w = 0 for 180°
+        return q
+
+    s = torch.sqrt((1. + c) * 2)
+    q = torch.cat([s * 0.5, v / s], dim=-1)  # (w, x, y, z)
+
+    return F.normalize(q, dim=-1)
+
+
+
 def quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
 
     w, x, y, z = torch.unbind(quaternion, dim=-1)

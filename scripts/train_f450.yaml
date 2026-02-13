@@ -6,15 +6,104 @@ hydra:
 
 headless: true #false #true
 
-
 sim: ${task.sim}
 env: ${task.env}
 
-total_frames: 150_000_000 #1_000_000_000 #35_000_000 #150_000_000
+total_frames: 1_000_000_000 #150_000_000 #1_000_000_000 #35_000_000
 max_iters: -1
 eval_interval: -1 #1000 #-1
 save_interval: 300 #-1
-seed: 0
+seed: 1225 #0 1992 715 85 325 1225 1234 
+#1225 for Inv DA/FT
+num_framestack: 0 #4
+
+############################################################################################################
+# pretrained_ckpt_path: checkpoint_PT_134217728.pth 
+
+# collection:
+#   pretrained_ckpt_path: checkpoint_PT_134217728.pth 
+#   num_trajectories_to_collect: 40000 #TOTAL: 17000
+#   save_chunk_size: 5000
+#   min_traj_len: 100
+
+# finetune:  # Fine-tuning
+#   policy_ckpt_path: "checkpoint_PT_134217728.pth"  # Checkpoint from Step 1: Pre-training
+#   delta_ckpt_path: "checkpoint_DA_235929600.pth"  # Checkpoint from Step 3: Delta Action Training
+#   smoothing_alpha: 1.0 #0.2 #0.1
+# eval:
+#   pretrained_ckpt_path: "checkpoint_PT_134217728.pth"
+#   delta_ckpt_path: "checkpoint_42074112.pth" 
+#   finetuned_ckpt_path: "checkpoint_PT_134217728.pth"
+#   num_episodes: 10  # The script will run this many episodes from random initial conditions.
+
+# real_world_deployment:
+#   pretrained_ckpt_path: "checkpoint_PT_134217728.pth"
+#   finetuned_ckpt_path: "checkpoint_11010048.pth"
+#   num_episodes: 20  # The script will run this many episodes from random initial conditions.
+
+############################################################################################################
+pretrained_ckpt_path: checkpoint_100199360_best.pth 
+
+collection:
+  pretrained_ckpt_path: checkpoint_Inv_FT_11010048.pth 
+  num_trajectories_to_collect: 350000000
+  save_chunk_size: 2500 #5000 #2500
+  min_traj_len: 100 #500 #100
+
+finetune:  # Fine-tuning
+  # policy_ckpt_path: "checkpoint_Inv_PT_67108864.pth"  # Checkpoint from Step 1: Pre-training
+  # delta_ckpt_path: "checkpoint_195652160.pth" #"checkpoint_Inv_103088128_best.pth" #"checkpoint_DA_Inv_85824000.pth"  # Checkpoint from Step 3: Delta Action Training
+  
+  policy_ckpt_path: "checkpoint_Inv_FT_11010048.pth"  # Checkpoint from Step 1: Pre-training
+  delta_ckpt_path: "checkpoint_Inv_DA_257722560_best_eval4.pth" #"checkpoint_Inv_103088128_best.pth" #"checkpoint_DA_Inv_85824000.pth"  # Checkpoint from Step 3: Delta Action Training
+  
+  # policy_ckpt_path: "checkpoint_Inv_PT_67108864.pth"  # Checkpoint from Step 1: Pre-training
+  # delta_ckpt_path: "checkpoint_InvDelAct6D04-03.pth" #"checkpoint_Inv_103088128_best.pth" #"checkpoint_DA_Inv_85824000.pth"  # Checkpoint from Step 3: Delta Action Training
+  
+  delta_action_noise_scale: 0.0 #0.7
+  delta_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  #0.1 #0.3 #0.5
+
+real_world_deployment:
+  pretrained_ckpt_path: "checkpoint_Inv_PT_67108864.pth"
+  finetuned_ckpt_path: "checkpoint_Inv_FT_11010048.pth"
+  # action_bias: [0.0, 0.0, 0.0, -0.2]
+  integral_gains: [0.5, 0.15]   # [Position Gain, Heading Gain]
+  integral_signs: [-1.0, 1.0]  #[pos_sign, heading_sign]
+
+  # pretrained_ckpt_path: "checkpoint_Inv_FT_11010048.pth"
+  # finetuned_ckpt_path: "checkpoint_Inv_FT2_11534336_eval4.pth"
+  # finetuned_iter2_ckpt_path: "checkpoint_Inv_FT2_11534336_eval4.pth"
+  # finetuned_ckpt_path: "checkpoint_34603008_best_error.pth"
+  num_episodes: 9  # The script will run this many episodes from random initial conditions.
+############################################################################################################
+
+defaults:
+  # - task: PayloadHover_f450  #Hover_f450  #PayloadHover_f450  #InvPendulumHover_f450
+  ############ Uncomment any of the tasks below to switch experiments ############
+  # --- Standard Tasks ---
+  # - task: PayloadHover_PreTraining
+  # - task: PayloadHover_RealDataCollection
+  # - task: PayloadHover_DeltaActionModel
+  # - task: PayloadHover_DeltaActionModel_EVAL
+  # - task: PayloadHover_FineTuning
+  # - task: PayloadHover_RealWorldDeployment
+  #
+  # --- Inverted Tasks ---
+  # - task: InvPayloadHover_PreTraining
+  # - task: InvPayloadHover_PreTraining_EVAL
+  # - task: InvPayloadHover_RealDataCollection
+  # - task: InvPayloadHover_DeltaActionModel
+  # - task: InvPayloadHover_DeltaActionModel_EVAL
+  # - task: InvPayloadHover_FineTuning
+  - task: InvPayloadHover_RealWorldDeployment
+
+  - algo: ppo
+  ############ Uncomment any of the tasks below to switch experiments ############
+  # - algo: PayloadHover_PPO
+  # - algo: InvPayloadHover_PPO
+  # - algo: PayloadHover_DeltaActionModel_PPO
+
+  - _self_
 
 viewer:
   resolution: [960, 720]
@@ -32,7 +121,3 @@ wandb:
   monitor_gym: True
   tags:
 
-defaults:
-  - task: Hover_f450 #InvPendulumHover_f450 #PayloadHover_f450 #Hover_f450
-  - algo: ppo
-  - _self_

@@ -1,5 +1,5 @@
 sim:
-  dt: 0.016
+  dt: 0.016  #TODO: 0.005, 0.016
   substeps: 1
   gravity: [0, 0, -9.81]
   replicate_physics: false
@@ -7,13 +7,13 @@ sim:
   use_gpu_pipeline: true
   device: "cuda:0"
 
-  solver_type: 1
+  solver_type: 1 #0: PGS (Projective Gauss-Seidel), 1: TGS (Temporal Gauss-Seidel)
   use_gpu: True # set to False to run on CPU
   bounce_threshold_velocity: 0.2
   friction_offset_threshold: 0.04
   friction_correlation_distance: 0.025
   enable_stabilization: True
-  # enable_scene_query_support: true # for Lidars (to be implemented)
+  enable_scene_query_support: false #true # for Lidars (to be implemented)
 
   # GPU buffers
   gpu_max_rigid_contact_count: 524288

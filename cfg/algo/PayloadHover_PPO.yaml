@@ -1,0 +1,40 @@
+# @package _group_
+# Hyperparameters for the pre-training and fine-tuning stages.
+
+name: ppo
+
+domain_adaptation: false
+framestack: false  #TODO
+use_equiv: false
+priv_actor: false
+priv_critic: false
+checkpoint_path: null
+
+actor_hidden_dim: 32  # BEST:32  #(default: [256, 256, 256]) 
+critic_hidden_dim: 256  # BEST:256 #(default: [256, 256, 256])
+
+gamma: 0.99  #(default: 0.99)
+GAE_lambda: 0.9  # BEST: 0.9 #(default: 0.95) 
+grad_max_norm: 10.0  # BEST: 10 #(default: 5) 
+
+train_every: 512 #1024 #BEST:1024  #(default: 32) 
+ppo_epochs: 10 #20  # BEST: 20 #(default: 4) 
+num_minibatches: 64 #128 # BEST:128 #(default: 16)
+critic_updates_per_batch: 6  # decoupled Update Frequency
+clip_param: 0.1 #0.2 # BEST:0.2 #(default: 0.1) 
+entropy_coef: 0.02 # BEST:0.01 #(default: 0.001) 
+entropy_coef_final: 0.001  # BEST:0.001 
+entropy_decay_steps: 300 # BEST:300 
+
+# Regularization lambdas
+lam_T: 0.2  # BEST:0.2 #(default: 0.4)
+lam_S: 0.1  # BEST:0.1 #(default: 0.3)
+lam_M: 0.3  # BEST:0.3 #(default: 0.6)
+
+# Scheduler config
+scheduler:
+  name: "CosineAnnealingWarmRestarts"
+  lr_a: float = 5e-5 #3e-4  # BEST:3e-4   #(default: 5e-4) 
+  lr_c: float = 1e-4 #2e-4  # BEST:2e-4   #(default: 5e-4) 
+  eta_min: float = 1e-6  # BEST:1e-5  
+  scheduler_T_0: int = 20000 #50_000_000
